@@ -1,27 +1,93 @@
-import { createAudioPlayer } from 'expo-audio';
+import { createAudioPlayer, setAudioModeAsync } from 'expo-audio';
 import { usePlayerStore } from '../store/usePlayerStore';
 
 let playerInstance: any = null;
 let statusSubscription: any = null;
-let currentUri: string | null = null; // track which URI is loaded
+let currentUri: string | null = null;
+
+// ── Audio mode — called once on first player creation ─────────────────────────
+let audioModeConfigured = false;
+const ensureAudioMode = async () => {
+  if (audioModeConfigured) return;
+  try {
+    await setAudioModeAsync({
+      playsInSilentMode: true,        // play through iOS silent switch
+      shouldPlayInBackground: true,   // keep playing when app is backgrounded
+      // doNotMix is REQUIRED for setActiveForLockScreen to work
+      interruptionMode: 'doNotMix',
+    });
+    audioModeConfigured = true;
+    console.log('[AudioService] Audio mode set: background + lock screen enabled');
+  } catch (err) {
+    console.warn('[AudioService] setAudioModeAsync failed:', err);
+  }
+};
+
+// ── Lock screen / media notification metadata ─────────────────────────────────
+export interface TrackMetadata {
+  title: string;
+  artist: string;
+  artworkUrl?: string;
+}
+
+const FALLBACK_ARTWORK = 'https://i.pinimg.com/736x/87/b9/69/87b969ed69c7cc9c3fdebd4da442d6c1.jpg';
+
+// Returns a valid http/https URL or undefined — the native layer needs a network-reachable URL
+const resolveArtworkUrl = (url?: string | null): string | undefined => {
+  if (!url) return FALLBACK_ARTWORK;
+  if (url.startsWith('http://') || url.startsWith('https://')) return url;
+  // local file paths / relative paths cannot be fetched by the OS notification service
+  return FALLBACK_ARTWORK;
+};
+
+const updateLockScreen = (metadata: TrackMetadata) => {
+  if (!playerInstance) return;
+  try {
+    playerInstance.setActiveForLockScreen(
+      true,
+      {
+        title: metadata.title,
+        artist: metadata.artist,
+        // NOTE: expo-audio v56 supports only Play/Pause + optional ±10s seek in the notification.
+        // Next / Previous buttons are not exposed by the native MediaSession callback.
+        artworkUrl: resolveArtworkUrl(metadata.artworkUrl),
+      },
+      {
+        // Show seek-forward/backward as the closest approximation to skip controls
+        showSeekForward: true,
+        showSeekBackward: true,
+      }
+    );
+    console.log(`[AudioService] Lock screen set: "${metadata.title}" by ${metadata.artist}`);
+  } catch (err) {
+    console.warn('[AudioService] setActiveForLockScreen failed:', err);
+  }
+};
 
 /**
  * Load and optionally play a URI.
- * If the same URI is already loaded, only the play/pause state is changed
- * — the player is NOT torn down and re-created.
+ * If the same URI is already loaded, only the play/pause state is changed.
  */
-export const playSound = async (uri: string, shouldPlay = true) => {
+export const playSound = async (
+  uri: string,
+  shouldPlay = true,
+  metadata?: TrackMetadata
+) => {
   const { setSound, setIsPlaying, updateProgress, nextTrack } = usePlayerStore.getState();
 
   try {
-    // ── Deduplication & Reuse ───────────────────────────────────────────────────
+    await ensureAudioMode();
+
+    // ── Deduplication & Reuse ────────────────────────────────────────────────
     if (playerInstance) {
       if (currentUri !== uri) {
         console.log(`[AudioService] Replacing URI: ${uri}`);
         playerInstance.replace(uri);
         currentUri = uri;
+        // Update lock screen metadata for the new track
+        if (metadata) updateLockScreen(metadata);
       }
-      
+
       setIsPlaying(shouldPlay);
       if (shouldPlay) {
         playerInstance.play();
@@ -33,7 +99,7 @@ export const playSound = async (uri: string, shouldPlay = true) => {
 
     console.log(`[AudioService] Initializing URI: ${uri}, shouldPlay: ${shouldPlay}`);
 
-    // ── Create new AudioPlayer ────────────────────────────────────────────────
+    // ── Create new AudioPlayer ───────────────────────────────────────────────
     playerInstance = createAudioPlayer(uri);
     currentUri = uri;
     setSound(playerInstance);
@@ -43,7 +109,10 @@ export const playSound = async (uri: string, shouldPlay = true) => {
       playerInstance.play();
     }
 
-    // ── Status listener ───────────────────────────────────────────────────────
+    // Set lock screen metadata right after player creation
+    if (metadata) updateLockScreen(metadata);
+
+    // ── Status listener ──────────────────────────────────────────────────────
     statusSubscription = playerInstance.addListener('playbackStatusUpdate', (status: any) => {
       updateProgress(status.currentTime || 0, status.duration || 0);
 
@@ -58,7 +127,11 @@ export const playSound = async (uri: string, shouldPlay = true) => {
         if (state.tracks.length > 0) {
           const nextTrackItem = state.tracks[state.currentTrackIndex];
           if (nextTrackItem) {
-            playSound(nextTrackItem.uri, true);
+            playSound(nextTrackItem.uri, true, {
+              title: nextTrackItem.filename?.replace(/\.[^/.]+$/, '') || 'Unknown',
+              artist: nextTrackItem.artist || 'Unknown Artist',
+              artworkUrl: nextTrackItem.artwork ?? undefined,
+            });
           }
         }
       }
@@ -76,24 +149,31 @@ export const togglePlayPause = async () => {
     if (tracks.length > 0 && currentTrackIndex !== null) {
       const track = tracks[currentTrackIndex];
       if (track) {
-        await playSound(track.uri, true);
+        await playSound(track.uri, true, {
+          title: track.filename?.replace(/\.[^/.]+$/, '') || 'Unknown',
+          artist: track.artist || 'Unknown Artist',
+          artworkUrl: track.artwork ?? undefined,
+        });
       }
     }
     return;
   }
 
-  // Check if track index changed (e.g. from swiping) without playing
+  // If track index changed (e.g. from next/prev), load the new track
   if (tracks.length > 0 && currentTrackIndex !== null) {
     const expectedTrack = tracks[currentTrackIndex];
     if (expectedTrack && currentUri !== expectedTrack.uri) {
-      console.log(`[AudioService] Track changed via swipe, loading new URI: ${expectedTrack.uri}`);
-      await playSound(expectedTrack.uri, true);
+      console.log(`[AudioService] Track changed, loading: ${expectedTrack.uri}`);
+      await playSound(expectedTrack.uri, true, {
+        title: expectedTrack.filename?.replace(/\.[^/.]+$/, '') || 'Unknown',
+        artist: expectedTrack.artist || 'Unknown Artist',
+        artworkUrl: expectedTrack.artwork ?? undefined,
+      });
       return;
     }
   }
 
-  console.log(`[AudioService] Toggling Play/Pause. Currently playing: ${isPlaying}`);
-
+  console.log(`[AudioService] Toggling Play/Pause. Currently: ${isPlaying}`);
   if (isPlaying) {
     playerInstance.pause();
     setIsPlaying(false);

@@ -12,6 +12,7 @@ import {
   TextInput,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { router } from 'expo-router';
 
 import { usePlayerStore, AudioTrack } from '../store/usePlayerStore';
 import { playSound, seekSound, togglePlayPause } from '../services/audioService';
@@ -22,28 +23,42 @@ import Animated, {
   useSharedValue,
   useAnimatedStyle,
   withSpring,
+  withTiming,
+  Easing,
   interpolate,
   Extrapolation,
   runOnJS,
   cancelAnimation,
 } from 'react-native-reanimated';
 import { Image } from 'expo-image';
-import { useGetLibrarySongsQuery, useLazySearchMusicQuery, BASE_URL, useGetListeningHistoryQuery } from '../store/api/youtubeMusicApi';
-
+import { 
+  useGetLibrarySongsQuery, 
+  useLazySearchMusicQuery, 
+  BASE_URL, 
+  useGetListeningHistoryQuery,
+  useGetTrendingQuery,
+  useGetPodcastsQuery,
+  useGetNewReleasesQuery
+} from '../store/api/youtubeMusicApi';
+import { MediaCard } from '../components/MediaCard';
+import { MediaCardSkeleton } from '../components/MediaCardSkeleton';
+import { MiniAudioPlayer } from '../components/MiniAudioPlayer';
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
+// We use a high-quality spring now that layout thrashing is gone. 
+// This provides a buttery, organic Apple-like feel.
 const EXPAND_SPRING: Parameters<typeof withSpring>[1] = {
-  damping: 32,
-  stiffness: 380,
-  mass: 0.8,
+  damping: 26,
+  stiffness: 260,
+  mass: 0.9,
   overshootClamping: false,
 };
 
 const COLLAPSE_SPRING: Parameters<typeof withSpring>[1] = {
-  damping: 38,
-  stiffness: 420,
-  mass: 0.7,
-  overshootClamping: true,
+  damping: 28,
+  stiffness: 280,
+  mass: 0.9,
+  overshootClamping: false,
 };
 
 interface CardLayout {
@@ -68,11 +83,13 @@ const WaveformProgress = memo(() => {
   const totalSecs = Math.floor(trackDuration % 60);
 
   // Generate 35 randomish heights for the fake waveform
-  const bars = Array.from({ length: 35 }).map((_, i) => {
-    // some pseudo-random curve
-    const h = 10 + Math.abs(Math.sin(i * 0.5) * 15) + (i % 3) * 5;
-    return h;
-  });
+  const bars = React.useMemo(() => {
+    return Array.from({ length: 35 }).map((_, i) => {
+      // some pseudo-random curve
+      const h = 10 + Math.abs(Math.sin(i * 0.5) * 15) + (i % 3) * 5;
+      return h;
+    });
+  }, []);
 
   return (
     <View style={styles.waveformRow}>
@@ -107,71 +124,99 @@ const WaveformProgress = memo(() => {
 });
 
 // ── Hero Overlay ────────────────────────────────────────────────────────────
-interface HeroOverlayProps {
-  layout: CardLayout;
-  trackName: string;
-  duration: string;
-  onClose: () => void;
-  isPlaying: boolean;
-  onPlayPause: () => void;
-  artistName: string;
-}
+const AnimatedExpoImage = Animated.createAnimatedComponent(Image);
 
-const HeroOverlay: React.FC<HeroOverlayProps> = ({
-  layout,
-  trackName,
-  onClose,
-  isPlaying,
-  onPlayPause,
-  artistName
-}) => {
+const HeroOverlay: React.FC = () => {
   const insets = useSafeAreaInsets();
   const tracks = usePlayerStore((s) => s.tracks);
   const currentTrackIndex = usePlayerStore((s) => s.currentTrackIndex);
   const setCurrentTrackIndex = usePlayerStore((s) => s.setCurrentTrackIndex);
+  const isPlaying = usePlayerStore((s) => s.isPlaying);
+  const isHeroOpen = usePlayerStore((s) => s.isHeroOpen);
+  const setIsHeroOpen = usePlayerStore((s) => s.setIsHeroOpen);
 
   const currentTrack = tracks[currentTrackIndex];
+  const trackName = currentTrack?.filename?.replace(/\.[^/.]+$/, '') || 'Unknown';
+  const artistName = currentTrack?.artist || 'Unknown Artist';
   const artworkUri = currentTrack?.artwork || 'https://i.pinimg.com/736x/87/b9/69/87b969ed69c7cc9c3fdebd4da442d6c1.jpg';
 
-  const progress = useSharedValue(-1);
-  const [canClose, setCanClose] = useState(false);
+  const progress = useSharedValue(0);
 
-  useLayoutEffect(() => {
-    progress.value = withSpring(1, EXPAND_SPRING);
-    const t = setTimeout(() => setCanClose(true), 200);
-    return () => {
-      clearTimeout(t);
-      cancelAnimation(progress);
+  // Trigger animation when isHeroOpen changes
+  React.useEffect(() => {
+    if (isHeroOpen) {
+      progress.value = withSpring(1, EXPAND_SPRING);
+    } else {
+      progress.value = withSpring(0, COLLAPSE_SPRING);
+    }
+  }, [isHeroOpen]);
+
+  // MiniAudioPlayer is exactly at this position/size:
+  const startScaleY = 0.5; // Start at 50% of the screen height
+  const startTranslateY = 0; // 0 means perfectly centered on the screen
+
+  // Artwork shared element math
+  const finalArtworkSize = SCREEN_WIDTH * 0.85;
+  const initialArtworkSize = 48;
+  const startArtworkScale = initialArtworkSize / finalArtworkSize;
+  
+  const finalArtworkY = (insets.top || 40) + 10 + 50; // safe area + margin + header height
+  const finalCenterY = finalArtworkY + (finalArtworkSize / 2);
+  const initialCenterY = (SCREEN_HEIGHT - 138) + (initialArtworkSize / 2); // 138 is miniplayer top padding offset
+  const initialCenterX = 14 + (initialArtworkSize / 2); // 14 is horizontal padding in miniplayer
+  const finalCenterX = SCREEN_WIDTH / 2;
+
+  const artworkStyle = useAnimatedStyle(() => {
+    'worklet';
+    return {
+      transform: [
+        { translateX: interpolate(progress.value, [0, 1], [initialCenterX - finalCenterX, 0], Extrapolation.CLAMP) },
+        { translateY: interpolate(progress.value, [0, 1], [initialCenterY - finalCenterY, 0], Extrapolation.CLAMP) },
+        { scale: interpolate(progress.value, [0, 1], [startArtworkScale, 1], Extrapolation.CLAMP) },
+      ],
+      // Approximate border radius scaling (48px box has 8px radius -> 8/scale)
+      borderRadius: interpolate(progress.value, [0, 1], [8 / startArtworkScale, 20], Extrapolation.CLAMP),
     };
-  }, []);
+  });
 
   const containerStyle = useAnimatedStyle(() => {
     'worklet';
-    const p = Math.max(progress.value, 0);
     return {
-      left: interpolate(p, [0, 1], [layout.x, 0], Extrapolation.CLAMP),
-      top: interpolate(p, [0, 1], [layout.y, 0], Extrapolation.CLAMP),
-      width: interpolate(p, [0, 1], [layout.width, SCREEN_WIDTH], Extrapolation.CLAMP),
-      height: interpolate(p, [0, 1], [layout.height, SCREEN_HEIGHT], Extrapolation.CLAMP),
-      borderRadius: interpolate(p, [0, 1], [24, 0], Extrapolation.CLAMP),
-      opacity: progress.value < 0 ? 0 : 1,
+      left: 0,
+      top: 0,
+      width: SCREEN_WIDTH,
+      height: SCREEN_HEIGHT,
+      opacity: progress.value < 0.05 ? 0 : 1, 
+      pointerEvents: progress.value < 0.5 ? 'none' : 'auto',
+    };
+  });
+
+  const backgroundStyle = useAnimatedStyle(() => {
+    'worklet';
+    return {
+      transform: [
+        { translateY: interpolate(progress.value, [0, 1], [startTranslateY, 0], Extrapolation.CLAMP) },
+        { scaleX: interpolate(progress.value, [0, 1], [0.95, 1], Extrapolation.CLAMP) },
+        { scaleY: interpolate(progress.value, [0, 1], [startScaleY, 1], Extrapolation.CLAMP) },
+      ],
+      borderRadius: interpolate(progress.value, [0, 1], [32, 0], Extrapolation.CLAMP),
+      backgroundColor: '#1C1C1E',
     };
   });
 
   const detailContentStyle = useAnimatedStyle(() => {
     'worklet';
-    const p = Math.max(progress.value, 0);
     return {
-      opacity: interpolate(p, [0.5, 0.9], [0, 1], Extrapolation.CLAMP),
+      // Delay fade-in so the flying artwork draws the eye first
+      opacity: interpolate(progress.value, [0.35, 0.95], [0, 1], Extrapolation.CLAMP),
+      transform: [
+        { translateY: interpolate(progress.value, [0, 1], [60, 0], Extrapolation.CLAMP) },
+      ],
     };
   });
 
   const handleClose = () => {
-    if (!canClose) return;
-    setCanClose(false);
-    progress.value = withSpring(0, COLLAPSE_SPRING, (finished) => {
-      if (finished) runOnJS(onClose)();
-    });
+    setIsHeroOpen(false);
   };
 
   const handleNext = () => {
@@ -186,8 +231,14 @@ const HeroOverlay: React.FC<HeroOverlayProps> = ({
     }
   };
 
+  // If no track, just return empty view so it doesn't crash, but container style keeps it hidden
+  if (!currentTrack) return <Animated.View style={[styles.heroOverlay, containerStyle]} />;
+
   return (
     <Animated.View style={[styles.heroOverlay, containerStyle]}>
+      {/* Expanding background layer */}
+      <Animated.View style={[StyleSheet.absoluteFill, backgroundStyle]} />
+
       <Animated.View style={[StyleSheet.absoluteFill, detailContentStyle]}>
         
         {/* Soft Glow */}
@@ -208,10 +259,8 @@ const HeroOverlay: React.FC<HeroOverlayProps> = ({
           </TouchableOpacity>
         </View>
 
-        {/* Artwork */}
-        <View style={styles.heroArtworkArea}>
-          <Image source={{ uri: artworkUri }} style={styles.heroArtwork} contentFit="cover" />
-        </View>
+        {/* Dummy space to hold layout for artwork */}
+        <View style={[styles.heroArtworkArea, { height: finalArtworkSize }]} />
 
         {/* Info & Controls */}
         <View style={styles.heroInfoPanel}>
@@ -236,7 +285,7 @@ const HeroOverlay: React.FC<HeroOverlayProps> = ({
               <Ionicons name="play-skip-back" size={32} color="#fff" />
             </TouchableOpacity>
             
-            <TouchableOpacity onPress={onPlayPause} style={styles.heroPlayBtn}>
+            <TouchableOpacity onPress={togglePlayPause} style={styles.heroPlayBtn}>
               <Ionicons name={isPlaying ? 'pause' : 'play'} size={32} color="#000" />
             </TouchableOpacity>
             
@@ -258,18 +307,39 @@ const HeroOverlay: React.FC<HeroOverlayProps> = ({
 
         </View>
       </Animated.View>
+
+      {/* The actual Artwork that scales up independently */}
+      <View style={[StyleSheet.absoluteFill, { pointerEvents: 'none', zIndex: 10 }]}>
+        <View style={{ marginTop: finalArtworkY, alignItems: 'center' }}>
+          <AnimatedExpoImage 
+            source={{ uri: artworkUri }} 
+            style={[styles.heroArtwork, artworkStyle]} 
+            contentFit="cover" 
+          />
+        </View>
+      </View>
     </Animated.View>
   );
 };
 
 // ── LibraryScreen ────────────────────────────────────────────────────────────
 export const LibraryScreen: React.FC = () => {
-  const { tracks, currentTrackIndex, isPlaying, setTracks, setCurrentTrackIndex, setIsHeroOpen } = usePlayerStore();
+  const tracks = usePlayerStore((s) => s.tracks);
+  const currentTrackIndex = usePlayerStore((s) => s.currentTrackIndex);
+  const isPlaying = usePlayerStore((s) => s.isPlaying);
+  const setTracks = usePlayerStore((s) => s.setTracks);
+  const setCurrentTrackIndex = usePlayerStore((s) => s.setCurrentTrackIndex);
+  const setIsHeroOpen = usePlayerStore((s) => s.setIsHeroOpen);
+  
   const [activeTab, setActiveTab] = useState('Popular');
   const [isSearchActive, setIsSearchActive] = useState(false);
 
   const { data: cloudLibrary, isLoading: isCloudLoading } = useGetLibrarySongsQuery();
   const { data: historyData, isLoading: isHistoryLoading } = useGetListeningHistoryQuery();
+
+  const { data: trendingData, isLoading: isTrendingLoading } = useGetTrendingQuery();
+  const { data: podcastData, isLoading: isPodcastLoading } = useGetPodcastsQuery();
+  const { data: newData, isLoading: isNewLoading } = useGetNewReleasesQuery();
 
   const [searchQuery, setSearchQuery] = useState('');
   const [triggerSearch, { data: searchResults, isFetching: isSearchLoading }] = useLazySearchMusicQuery();
@@ -299,27 +369,11 @@ export const LibraryScreen: React.FC = () => {
         setCurrentTrackIndex(0);
       }
     }
-  }, [historyData, cloudLibrary, tracks.length]);
-
-  const [heroLayout, setHeroLayout] = useState<CardLayout | null>(null);
+  }, [historyData, cloudLibrary]);
 
   const openHero = (index: number) => {
-    // For simplicity, just pop it from center if no ref
-    setHeroLayout({
-      x: SCREEN_WIDTH / 2 - 100,
-      y: SCREEN_HEIGHT / 2 - 100,
-      width: 200,
-      height: 200,
-      color: '#121212',
-      trackIndex: index,
-    });
     setIsHeroOpen(true);
   };
-
-  const closeHero = useCallback(() => {
-    setHeroLayout(null);
-    setIsHeroOpen(false);
-  }, [setIsHeroOpen]);
 
   const handleStreamSong = (song: any) => {
     const newTrack: AudioTrack = {
@@ -342,8 +396,12 @@ export const LibraryScreen: React.FC = () => {
     }
 
     setCurrentTrackIndex(targetIndex);
-    playSound(newTrack.uri);
-    
+    playSound(newTrack.uri, true, {
+      title: newTrack.filename?.replace(/\.[^/.]+$/, '') || 'Unknown',
+      artist: newTrack.artist || 'Unknown Artist',
+      artworkUrl: newTrack.artwork ?? undefined,
+    });
+
     // open Hero automatically
     openHero(targetIndex);
   };
@@ -356,6 +414,13 @@ export const LibraryScreen: React.FC = () => {
   return (
     <View style={styles.container}>
       <StatusBar barStyle="light-content" translucent backgroundColor="transparent" />
+
+      {/* ── Top gradient overlay ── */}
+      <LinearGradient
+        colors={['rgba(108,99,255,0.45)', 'rgba(80,60,200,0.18)', 'transparent']}
+        style={styles.topGradient}
+        pointerEvents="none"
+      />
 
       <SafeAreaView style={{ flex: 1 }}>
         {/* Top Header */}
@@ -371,12 +436,19 @@ export const LibraryScreen: React.FC = () => {
                 placeholderTextColor="rgba(255,255,255,0.5)"
                 value={searchQuery}
                 onChangeText={setSearchQuery}
-                onSubmitEditing={() => triggerSearch({ q: searchQuery })}
+                onSubmitEditing={() => {
+                  if (searchQuery.trim().length > 0) {
+                    triggerSearch({ q: searchQuery.trim() });
+                  }
+                }}
                 returnKeyType="search"
                 autoFocus
               />
               {searchQuery.length > 0 && (
-                <TouchableOpacity onPress={() => { setSearchQuery(''); triggerSearch({ q: '' }); }}>
+                <TouchableOpacity onPress={() => { 
+                  setSearchQuery(''); 
+                  setIsSearchActive(false); 
+                }}>
                   <Ionicons name="close-circle" size={20} color="rgba(255,255,255,0.5)" />
                 </TouchableOpacity>
               )}
@@ -390,7 +462,7 @@ export const LibraryScreen: React.FC = () => {
                 <TouchableOpacity style={styles.iconBtn}>
                   <Ionicons name="notifications-outline" size={24} color="#fff" />
                 </TouchableOpacity>
-                <TouchableOpacity style={styles.iconBtn}>
+                <TouchableOpacity style={styles.iconBtn} onPress={() => router.push('/settings')}>
                   <Ionicons name="settings-outline" size={24} color="#fff" />
                 </TouchableOpacity>
               </View>
@@ -434,13 +506,34 @@ export const LibraryScreen: React.FC = () => {
 
             {/* Horizontal Featured */}
             <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.featuredContainer}>
-              {(cloudLibrary?.songs?.length ? cloudLibrary.songs : tracks).map((song: any, i: number) => (
-                <TouchableOpacity key={song.id || i} style={styles.featuredCard} onPress={() => handleStreamSong(song)}>
-                  <Image source={{ uri: song.thumbnail || song.artwork }} style={styles.featuredArtwork} contentFit="cover" />
-                  <Text style={styles.featuredTitle} numberOfLines={1}>{song.title || song.filename}</Text>
-                  <Text style={styles.featuredArtist} numberOfLines={1}>{song.artist}</Text>
-                </TouchableOpacity>
-              ))}
+              {activeTab === 'Trend' && (
+                isTrendingLoading 
+                  ? Array.from({length: 4}).map((_, i) => <MediaCardSkeleton key={`sk-trend-${i}`} />)
+                  : trendingData?.results?.map((song: any, i: number) => (
+                    <MediaCard key={song.videoId || i} title={song.title} artist={song.artist} thumbnail={song.thumbnail} onPress={() => handleStreamSong(song)} />
+                  ))
+              )}
+              {activeTab === 'New' && (
+                isNewLoading 
+                  ? Array.from({length: 4}).map((_, i) => <MediaCardSkeleton key={`sk-new-${i}`} />)
+                  : newData?.results?.map((song: any, i: number) => (
+                    <MediaCard key={song.videoId || i} title={song.title} artist={song.artist} thumbnail={song.thumbnail} onPress={() => handleStreamSong(song)} />
+                  ))
+              )}
+              {activeTab === 'Podcasts' && (
+                isPodcastLoading 
+                  ? Array.from({length: 4}).map((_, i) => <MediaCardSkeleton key={`sk-pod-${i}`} />)
+                  : podcastData?.results?.map((song: any, i: number) => (
+                    <MediaCard key={song.videoId || i} title={song.title} artist={song.artist} thumbnail={song.thumbnail} onPress={() => handleStreamSong(song)} />
+                  ))
+              )}
+              {(activeTab === 'Popular' || activeTab === 'Favourites') && (
+                isCloudLoading 
+                  ? Array.from({length: 4}).map((_, i) => <MediaCardSkeleton key={`sk-pop-${i}`} />)
+                  : (cloudLibrary?.songs?.length ? cloudLibrary.songs : tracks).map((song: any, i: number) => (
+                    <MediaCard key={song.id || song.videoId || i} title={song.title || song.filename} artist={song.artist || 'Unknown'} thumbnail={song.thumbnail || song.artwork} onPress={() => handleStreamSong(song)} />
+                  ))
+              )}
             </ScrollView>
 
             {/* Vertical List */}
@@ -473,24 +566,25 @@ export const LibraryScreen: React.FC = () => {
 
       </SafeAreaView>
 
+      {/* Mini Audio Player */}
+      <MiniAudioPlayer onExpand={() => currentTrack && openHero(currentTrackIndex)} />
+
       {/* Hero Overlay */}
-      {heroLayout && currentTrack && (
-        <HeroOverlay
-          layout={heroLayout}
-          trackName={currentTrack.filename.replace(/\.[^/.]+$/, '')}
-          artistName={currentTrack.artist}
-          duration={heroDuration}
-          onClose={closeHero}
-          isPlaying={isPlaying}
-          onPlayPause={togglePlayPause}
-        />
-      )}
+      <HeroOverlay />
     </View>
   );
 };
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#121212' },
+  topGradient: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 220,
+    zIndex: 0,
+  },
   browseHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -597,8 +691,7 @@ const styles = StyleSheet.create({
     right: 0,
     height: 80,
     backgroundColor: '#121212',
-    borderTopWidth: 1,
-    borderTopColor: 'rgba(255,255,255,0.1)',
+
     flexDirection: 'row',
     justifyContent: 'space-around',
     alignItems: 'center',

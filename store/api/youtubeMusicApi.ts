@@ -9,9 +9,22 @@ const defaultBaseUrl =
     : "http://localhost:3000/api/v1";
 export const BASE_URL = process.env.EXPO_PUBLIC_API_URL || defaultBaseUrl;
 
+const rawBaseQuery = fetchBaseQuery({ baseUrl: BASE_URL });
+
+const customBaseQuery = async (args: any, api: any, extraOptions: any) => {
+  console.log(`[API REQUEST] ${api.endpoint}:`, args);
+  const result = await rawBaseQuery(args, api, extraOptions);
+  if (result.error) {
+    console.error(`[API ERROR] ${api.endpoint}:`, result.error);
+  } else {
+    console.debug(`[API SUCCESS] ${api.endpoint}:`, result.data);
+  }
+  return result;
+};
+
 export const youtubeMusicApi = createApi({
   reducerPath: "youtubeMusicApi",
-  baseQuery: fetchBaseQuery({ baseUrl: BASE_URL }),
+  baseQuery: customBaseQuery,
   tagTypes: ["Downloads", "Songs", "Playlists", "History"],
   endpoints: (builder) => ({
     // 1. System
@@ -104,6 +117,28 @@ export const youtubeMusicApi = createApi({
       }),
       invalidatesTags: ["History"],
     }),
+
+    // 6. Explore
+    getTrending: builder.query<{ results: any[] }, { limit?: number } | void>({
+      query: (args) => ({
+        url: "/explore/trending",
+        params: { limit: args?.limit || 20 },
+      }),
+    }),
+
+    getPodcasts: builder.query<{ results: any[] }, { limit?: number } | void>({
+      query: (args) => ({
+        url: "/explore/podcasts",
+        params: { limit: args?.limit || 20 },
+      }),
+    }),
+
+    getNewReleases: builder.query<{ results: any[] }, { limit?: number } | void>({
+      query: (args) => ({
+        url: "/explore/new",
+        params: { limit: args?.limit || 20 },
+      }),
+    }),
   }),
 });
 
@@ -120,6 +155,9 @@ export const {
   useAddSongToPlaylistMutation,
   useGetListeningHistoryQuery,
   useRecordPlayHistoryMutation,
+  useGetTrendingQuery,
+  useGetPodcastsQuery,
+  useGetNewReleasesQuery,
 } = youtubeMusicApi;
 
 // Note: For streaming (GET /stream/:videoId), standard RTK Query is typically

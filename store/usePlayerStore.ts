@@ -41,7 +41,10 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
   favorites: [],
   isHeroOpen: false,
 
-  setIsHeroOpen: (isOpen) => set({ isHeroOpen: isOpen }),
+  setIsHeroOpen: (isOpen) => {
+    console.debug('[PlayerStore] setIsHeroOpen:', isOpen);
+    set({ isHeroOpen: isOpen });
+  },
 
   toggleFavorite: (id) => set((state) => ({
     favorites: state.favorites.includes(id) 
@@ -49,11 +52,20 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
       : [...state.favorites, id]
   })),
 
-  setTracks: (tracks) => set({ tracks }),
+  setTracks: (tracks) => {
+    console.debug(`[PlayerStore] setTracks: loaded ${tracks.length} tracks`);
+    set({ tracks });
+  },
   
-  setCurrentTrackIndex: (index) => set({ currentTrackIndex: index }),
+  setCurrentTrackIndex: (index) => {
+    console.debug('[PlayerStore] setCurrentTrackIndex:', index);
+    set({ currentTrackIndex: index });
+  },
   
-  setIsPlaying: (isPlaying) => set({ isPlaying }),
+  setIsPlaying: (isPlaying) => {
+    console.debug('[PlayerStore] setIsPlaying:', isPlaying);
+    set({ isPlaying });
+  },
   
   setSound: (sound) => set({ sound }),
   
@@ -68,6 +80,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
     const { currentTrackIndex, tracks } = get();
     if (currentTrackIndex !== null && tracks.length > 0) {
       const nextIndex = (currentTrackIndex + 1) % tracks.length;
+      console.debug('[PlayerStore] nextTrack: advancing to index', nextIndex);
       set({ currentTrackIndex: nextIndex });
     }
   },
