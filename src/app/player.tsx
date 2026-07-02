@@ -9,6 +9,8 @@ import {
   Text,
   TouchableOpacity,
   View,
+  PanResponder,
+  GestureResponderEvent,
 } from "react-native";
 import Animated from "react-native-reanimated";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -65,7 +67,7 @@ export default function PlayerScreen() {
     <Animated.View
       style={[styles.container, { backgroundColor: cardColor }]}
     >
-      <SafeAreaView style={{ flex: 1 }}>
+      <SafeAreaView style={{ flex: 1, paddingBottom: 20 }}>
         <View style={styles.header}>
           <TouchableOpacity
             onPress={() => router.back()}
@@ -98,24 +100,38 @@ export default function PlayerScreen() {
 
         {/* Progress Bar */}
         <View style={styles.progressContainer}>
-          <Pressable 
+          <View 
             onLayout={(e) => setProgressBarWidth(e.nativeEvent.layout.width)}
-            onPress={(e) => {
-              if (progressBarWidth > 0 && duration > 0) {
-                const touchX = e.nativeEvent.locationX;
-                const progress = touchX / progressBarWidth;
-                seekSound(progress * duration);
+            {...PanResponder.create({
+              onStartShouldSetPanResponder: () => true,
+              onMoveShouldSetPanResponder: () => true,
+              onPanResponderGrant: (e) => {
+                if (progressBarWidth > 0 && duration > 0) {
+                  let x = e.nativeEvent.locationX;
+                  if (x < 0) x = 0;
+                  if (x > progressBarWidth) x = progressBarWidth;
+                  seekSound((x / progressBarWidth) * duration);
+                }
+              },
+              onPanResponderMove: (e) => {
+                if (progressBarWidth > 0 && duration > 0) {
+                  let x = e.nativeEvent.locationX;
+                  if (x < 0) x = 0;
+                  if (x > progressBarWidth) x = progressBarWidth;
+                  seekSound((x / progressBarWidth) * duration);
+                }
               }
-            }}
+            }).panHandlers}
             style={styles.progressBarBg}
           >
             <View 
+              pointerEvents="none"
               style={[
                 styles.progressBarFill, 
                 { width: `${duration > 0 ? (position / duration) * 100 : 0}%` }
               ]} 
             />
-          </Pressable>
+          </View>
           <View style={styles.timeRow}>
             <Text style={styles.timeText}>
               {(() => {
@@ -189,8 +205,8 @@ const styles = StyleSheet.create({
   },
   artworkContainer: {
     alignItems: "center",
-    marginTop: 40,
-    marginBottom: 40,
+    marginTop: 50,
+    marginBottom: 50,
   },
   artworkWrapper: {
     width: width * 0.8,
@@ -225,17 +241,17 @@ const styles = StyleSheet.create({
   },
   progressContainer: {
     paddingHorizontal: 30,
-    marginTop: 40,
+    marginTop: 50,
   },
   progressBarBg: {
-    height: 6,
-    backgroundColor: "rgba(255, 255, 255, 0.1)",
-    borderRadius: 3,
+    height: 12,
+    backgroundColor: "rgba(255, 255, 255, 0.2)",
+    borderRadius: 6,
   },
   progressBarFill: {
     height: "100%",
     backgroundColor: theme.accent,
-    borderRadius: 3,
+    borderRadius: 6,
   },
   timeRow: {
     flexDirection: "row",
@@ -251,7 +267,7 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
-    marginTop: 40,
+    marginTop: 80,
     gap: 40,
   },
   secondaryButton: {

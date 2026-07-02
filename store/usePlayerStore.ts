@@ -26,6 +26,7 @@ export interface PlayerState {
   nextTrack: () => void;
   prevTrack: () => void;
   favorites: string[];
+  setFavorites: (favorites: string[]) => void;
   toggleFavorite: (id: string) => void;
   isHeroOpen: boolean;
   setIsHeroOpen: (isOpen: boolean) => void;
@@ -46,11 +47,25 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
     set({ isHeroOpen: isOpen });
   },
 
-  toggleFavorite: (id) => set((state) => ({
-    favorites: state.favorites.includes(id) 
+  setFavorites: (favorites) => set({ favorites }),
+
+  toggleFavorite: (id) => set((state) => {
+    const isFav = state.favorites.includes(id);
+    const newFavorites = isFav 
       ? state.favorites.filter(favId => favId !== id)
-      : [...state.favorites, id]
-  })),
+      : [...state.favorites, id];
+      
+    // Find the track to save in DB
+    const track = state.tracks.find(t => t.id === id);
+    if (track) {
+      // Dynamically import db to avoid circular deps or init issues
+      import('../services/db').then(({ toggleFavoriteDB }) => {
+        toggleFavoriteDB(track, !isFav);
+      });
+    }
+
+    return { favorites: newFavorites };
+  }),
 
   setTracks: (tracks) => {
     console.debug(`[PlayerStore] setTracks: loaded ${tracks.length} tracks`);

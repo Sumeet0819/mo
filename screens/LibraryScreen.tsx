@@ -1,48 +1,43 @@
-import React, { useState, useCallback, useLayoutEffect, memo } from 'react';
-import {
-  View,
-  Text,
-  StyleSheet,
-  ActivityIndicator,
-  StatusBar,
-  ScrollView,
-  TouchableOpacity,
-  Dimensions,
-  Pressable,
-  TextInput,
-} from 'react-native';
-import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
+import React, { memo, useState } from 'react';
+import {
+  ActivityIndicator,
+  Dimensions,
+  ScrollView,
+  StatusBar,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View
+} from 'react-native';
+import { Gesture, GestureDetector } from 'react-native-gesture-handler';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { usePlayerStore, AudioTrack } from '../store/usePlayerStore';
-import { playSound, seekSound, togglePlayPause } from '../services/audioService';
-import { theme } from '../constants/theme';
-import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
-import Animated, {
-  useSharedValue,
-  useAnimatedStyle,
-  withSpring,
-  withTiming,
-  Easing,
-  interpolate,
-  Extrapolation,
-  runOnJS,
-  cancelAnimation,
-} from 'react-native-reanimated';
 import { Image } from 'expo-image';
-import { 
-  useGetLibrarySongsQuery, 
-  useLazySearchMusicQuery, 
-  BASE_URL, 
-  useGetListeningHistoryQuery,
-  useGetTrendingQuery,
-  useGetPodcastsQuery,
-  useGetNewReleasesQuery
-} from '../store/api/youtubeMusicApi';
-import { MediaCard } from '../components/MediaCard';
-import { MediaCardSkeleton } from '../components/MediaCardSkeleton';
+import { LinearGradient } from 'expo-linear-gradient';
+import Animated, {
+  Extrapolation,
+  interpolate,
+  runOnJS,
+  useAnimatedStyle,
+  useSharedValue,
+  withSpring
+} from 'react-native-reanimated';
 import { MiniAudioPlayer } from '../components/MiniAudioPlayer';
+import { playSound, seekSound, togglePlayPause } from '../services/audioService';
+import { addRecentlyPlayed, addRecentSearch, getRecentlyPlayed, getRecentSearches } from '../services/db';
+import {
+  BASE_URL,
+  useGetLibrarySongsQuery,
+  useGetListeningHistoryQuery,
+  useGetNewReleasesQuery,
+  useGetPodcastsQuery,
+  useGetTrendingQuery,
+  useLazySearchMusicQuery
+} from '../store/api/youtubeMusicApi';
+import { AudioTrack, usePlayerStore } from '../store/usePlayerStore';
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
 // We use a high-quality spring now that layout thrashing is gone. 
@@ -85,30 +80,44 @@ const WaveformProgress = memo(() => {
   // Generate 35 randomish heights for the fake waveform
   const bars = React.useMemo(() => {
     return Array.from({ length: 35 }).map((_, i) => {
-      // some pseudo-random curve
-      const h = 10 + Math.abs(Math.sin(i * 0.5) * 15) + (i % 3) * 5;
+      const h = 20 + Math.abs(Math.sin(i * 0.5) * 30) + (i % 3) * 10;
       return h;
     });
   }, []);
+
+  const handleSeek = (x: number) => {
+    if (barWidth > 0 && trackDuration > 0) {
+      let boundedX = x;
+      if (boundedX < 0) boundedX = 0;
+      if (boundedX > barWidth) boundedX = barWidth;
+      seekSound((boundedX / barWidth) * trackDuration);
+    }
+  };
+
+  const gesture = Gesture.Pan()
+    .minDistance(0)
+    .onStart((e) => {
+      runOnJS(handleSeek)(e.x);
+    })
+    .onUpdate((e) => {
+      runOnJS(handleSeek)(e.x);
+    });
 
   return (
     <View style={styles.waveformRow}>
       <Text style={styles.waveformTime}>{`${mins}:${String(secs).padStart(2, '0')}`}</Text>
       
-      <Pressable 
-        style={styles.waveformContainer}
-        onLayout={(e) => setBarWidth(e.nativeEvent.layout.width)}
-        onPress={(e) => {
-          if (barWidth > 0 && trackDuration > 0) {
-            seekSound((e.nativeEvent.locationX / barWidth) * trackDuration);
-          }
-        }}
-      >
-        {bars.map((h, i) => {
+      <GestureDetector gesture={gesture}>
+        <View 
+          style={styles.waveformContainer}
+          onLayout={(e) => setBarWidth(e.nativeEvent.layout.width)}
+        >
+          {bars.map((h, i) => {
           const isActive = (i / bars.length) <= progressPercent;
           return (
             <View 
               key={i} 
+              pointerEvents="none"
               style={[
                 styles.waveformBar, 
                 { height: h, backgroundColor: isActive ? '#fff' : 'rgba(255,255,255,0.2)' }
@@ -116,7 +125,8 @@ const WaveformProgress = memo(() => {
             />
           );
         })}
-      </Pressable>
+        </View>
+      </GestureDetector>
 
       <Text style={styles.waveformTime}>{`${totalMins}:${String(totalSecs).padStart(2, '0')}`}</Text>
     </View>
@@ -151,6 +161,22 @@ const HeroOverlay: React.FC = () => {
     }
   }, [isHeroOpen]);
 
+  const panGesture = Gesture.Pan()
+    .activeOffsetY(10)
+    .onUpdate((e) => {
+      const newProgress = 1 - (e.translationY / SCREEN_HEIGHT);
+      if (newProgress <= 1) {
+        progress.value = newProgress;
+      }
+    })
+    .onEnd((e) => {
+      if (e.translationY > 150 || e.velocityY > 500) {
+        runOnJS(setIsHeroOpen)(false);
+      } else {
+        progress.value = withSpring(1, EXPAND_SPRING);
+      }
+    });
+
   // MiniAudioPlayer is exactly at this position/size:
   const startScaleY = 0.5; // Start at 50% of the screen height
   const startTranslateY = 0; // 0 means perfectly centered on the screen
@@ -160,7 +186,10 @@ const HeroOverlay: React.FC = () => {
   const initialArtworkSize = 48;
   const startArtworkScale = initialArtworkSize / finalArtworkSize;
   
-  const finalArtworkY = (insets.top || 40) + 10 + 50; // safe area + margin + header height
+  const headerHeight = (insets.top || 40) + 10 + 50;
+  const blockHeight = finalArtworkSize + 40 + 280;
+  const availableSpace = SCREEN_HEIGHT - headerHeight;
+  const finalArtworkY = headerHeight + Math.max(10, (availableSpace - blockHeight) / 6);
   const finalCenterY = finalArtworkY + (finalArtworkSize / 2);
   const initialCenterY = (SCREEN_HEIGHT - 138) + (initialArtworkSize / 2); // 138 is miniplayer top padding offset
   const initialCenterX = 14 + (initialArtworkSize / 2); // 14 is horizontal padding in miniplayer
@@ -235,8 +264,9 @@ const HeroOverlay: React.FC = () => {
   if (!currentTrack) return <Animated.View style={[styles.heroOverlay, containerStyle]} />;
 
   return (
-    <Animated.View style={[styles.heroOverlay, containerStyle]}>
-      {/* Expanding background layer */}
+    <GestureDetector gesture={panGesture}>
+      <Animated.View style={[styles.heroOverlay, containerStyle]}>
+        {/* Expanding background layer */}
       <Animated.View style={[StyleSheet.absoluteFill, backgroundStyle]} />
 
       <Animated.View style={[StyleSheet.absoluteFill, detailContentStyle]}>
@@ -260,22 +290,23 @@ const HeroOverlay: React.FC = () => {
         </View>
 
         {/* Dummy space to hold layout for artwork */}
-        <View style={[styles.heroArtworkArea, { height: finalArtworkSize }]} />
+        <View style={[styles.heroArtworkArea, { height: finalArtworkSize, marginTop: finalArtworkY - headerHeight }]} />
 
         {/* Info & Controls */}
         <View style={styles.heroInfoPanel}>
-          
-          <View style={styles.heroInfoRow}>
-            <View style={{ flex: 1 }}>
+          <View>
+            <View style={styles.heroInfoRow}>
+            <View style={{ flex: 1, marginRight: 16 }}>
               <Text style={styles.heroInfoTitle} numberOfLines={1}>{trackName}</Text>
               <Text style={styles.heroInfoArtist} numberOfLines={1}>{artistName}</Text>
             </View>
-            <TouchableOpacity>
+            <TouchableOpacity style={{ padding: 8, marginRight: -8 }}>
               <Ionicons name="heart-outline" size={28} color="#fff" />
             </TouchableOpacity>
           </View>
 
-          <WaveformProgress />
+            <WaveformProgress />
+          </View>
 
           <View style={styles.heroControls}>
             <TouchableOpacity>
@@ -297,13 +328,6 @@ const HeroOverlay: React.FC = () => {
             </TouchableOpacity>
           </View>
 
-          {/* Lyrics Button */}
-          <View style={styles.lyricsContainer}>
-            <TouchableOpacity style={styles.lyricsBtn}>
-              <Text style={styles.lyricsBtnText}>Lyrics</Text>
-              <Ionicons name="chevron-down" size={16} color="#fff" style={{ marginLeft: 4 }} />
-            </TouchableOpacity>
-          </View>
 
         </View>
       </Animated.View>
@@ -319,7 +343,18 @@ const HeroOverlay: React.FC = () => {
         </View>
       </View>
     </Animated.View>
+    </GestureDetector>
   );
+};
+
+const chunkArray = (array: any[], size: number) => {
+  const chunked = [];
+  let index = 0;
+  while (index < (array?.length || 0)) {
+    chunked.push(array.slice(index, size + index));
+    index += size;
+  }
+  return chunked;
 };
 
 // ── LibraryScreen ────────────────────────────────────────────────────────────
@@ -342,9 +377,21 @@ export const LibraryScreen: React.FC = () => {
   const { data: newData, isLoading: isNewLoading } = useGetNewReleasesQuery();
 
   const [searchQuery, setSearchQuery] = useState('');
+  const [recentSearches, setRecentSearches] = useState<string[]>([]);
+  const [recentlyPlayedDb, setRecentlyPlayedDb] = useState<any[]>([]);
   const [triggerSearch, { data: searchResults, isFetching: isSearchLoading }] = useLazySearchMusicQuery();
 
   const insets = useSafeAreaInsets();
+
+  React.useEffect(() => {
+    if (isSearchActive) {
+      getRecentSearches().then(setRecentSearches);
+    }
+  }, [isSearchActive]);
+
+  React.useEffect(() => {
+    getRecentlyPlayed().then(setRecentlyPlayedDb);
+  }, []);
 
   React.useEffect(() => {
     let sourceData = cloudLibrary?.songs || [];
@@ -381,9 +428,12 @@ export const LibraryScreen: React.FC = () => {
       filename: song.title,
       uri: `${BASE_URL}/stream/${song.videoId || song.id}`,
       duration: song.duration || 0,
-      artwork: song.thumbnail,
+      artwork: song.thumbnail || song.artwork,
       artist: song.artist || 'YouTube Music',
     };
+
+    addRecentlyPlayed(newTrack);
+    getRecentlyPlayed().then(setRecentlyPlayedDb);
 
     const existsIndex = tracks.findIndex(t => t.id === newTrack.id);
     let targetIndex = tracks.length;
@@ -438,7 +488,10 @@ export const LibraryScreen: React.FC = () => {
                 onChangeText={setSearchQuery}
                 onSubmitEditing={() => {
                   if (searchQuery.trim().length > 0) {
-                    triggerSearch({ q: searchQuery.trim() });
+                    const query = searchQuery.trim();
+                    addRecentSearch(query);
+                    getRecentSearches().then(setRecentSearches);
+                    triggerSearch({ q: query });
                   }
                 }}
                 returnKeyType="search"
@@ -491,67 +544,68 @@ export const LibraryScreen: React.FC = () => {
                    </TouchableOpacity>
                  ))}
                </View>
-            ) : null}
+            ) : (
+               <View>
+                 {recentSearches.length > 0 && <Text style={styles.sectionTitle}>Recent Searches</Text>}
+                 {recentSearches.map((query, index) => (
+                   <TouchableOpacity key={`rs-${index}`} onPress={() => {
+                     setSearchQuery(query);
+                     addRecentSearch(query);
+                     getRecentSearches().then(setRecentSearches);
+                     triggerSearch({ q: query });
+                   }} style={styles.recentSearchItem}>
+                     <Ionicons name="time-outline" size={20} color="rgba(255,255,255,0.5)" style={{ marginRight: 12 }} />
+                     <Text style={{ color: '#fff', fontSize: 16 }}>{query}</Text>
+                   </TouchableOpacity>
+                 ))}
+               </View>
+            )}
           </ScrollView>
         ) : (
           <ScrollView>
             {/* Tabs */}
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.tabsContainer}>
-              {['Popular', 'New', 'Trend', 'Podcasts', 'Favourites'].map(tab => (
-                <TouchableOpacity key={tab} onPress={() => setActiveTab(tab)}>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.tabsContainer} contentContainerStyle={{ paddingHorizontal: 20 }}>
+              {['Podcasts', 'Romance', 'Relax', 'Feel good', 'Sleep'].map(tab => (
+                <TouchableOpacity key={tab} onPress={() => setActiveTab(tab)} style={[styles.tabItem, activeTab === tab && styles.tabItemActive]}>
                   <Text style={[styles.tabText, activeTab === tab && styles.tabTextActive]}>{tab}</Text>
                 </TouchableOpacity>
               ))}
             </ScrollView>
 
-            {/* Horizontal Featured */}
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.featuredContainer}>
-              {activeTab === 'Trend' && (
-                isTrendingLoading 
-                  ? Array.from({length: 4}).map((_, i) => <MediaCardSkeleton key={`sk-trend-${i}`} />)
-                  : trendingData?.results?.map((song: any, i: number) => (
-                    <MediaCard key={song.videoId || i} title={song.title} artist={song.artist} thumbnail={song.thumbnail} onPress={() => handleStreamSong(song)} />
-                  ))
-              )}
-              {activeTab === 'New' && (
-                isNewLoading 
-                  ? Array.from({length: 4}).map((_, i) => <MediaCardSkeleton key={`sk-new-${i}`} />)
-                  : newData?.results?.map((song: any, i: number) => (
-                    <MediaCard key={song.videoId || i} title={song.title} artist={song.artist} thumbnail={song.thumbnail} onPress={() => handleStreamSong(song)} />
-                  ))
-              )}
-              {activeTab === 'Podcasts' && (
-                isPodcastLoading 
-                  ? Array.from({length: 4}).map((_, i) => <MediaCardSkeleton key={`sk-pod-${i}`} />)
-                  : podcastData?.results?.map((song: any, i: number) => (
-                    <MediaCard key={song.videoId || i} title={song.title} artist={song.artist} thumbnail={song.thumbnail} onPress={() => handleStreamSong(song)} />
-                  ))
-              )}
-              {(activeTab === 'Popular' || activeTab === 'Favourites') && (
-                isCloudLoading 
-                  ? Array.from({length: 4}).map((_, i) => <MediaCardSkeleton key={`sk-pop-${i}`} />)
-                  : (cloudLibrary?.songs?.length ? cloudLibrary.songs : tracks).map((song: any, i: number) => (
-                    <MediaCard key={song.id || song.videoId || i} title={song.title || song.filename} artist={song.artist || 'Unknown'} thumbnail={song.thumbnail || song.artwork} onPress={() => handleStreamSong(song)} />
-                  ))
-              )}
-            </ScrollView>
+            {/* Quick Picks */}
+            <View style={styles.quickPicksSection}>
+              <View style={styles.sectionHeader}>
+              </View>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} snapToInterval={SCREEN_WIDTH * 0.85 + 16} decelerationRate="fast" contentContainerStyle={{ paddingHorizontal: 20 }}>
+                {chunkArray(trendingData?.results || (cloudLibrary?.songs?.length ? cloudLibrary.songs : tracks), 4).map((chunk, chunkIdx) => (
+                  <View key={`chunk-${chunkIdx}`} style={styles.quickPickColumn}>
+                    {chunk.map((song: any, i: number) => (
+                      <TouchableOpacity key={song.videoId || song.id || i} style={styles.quickPickItem} onPress={() => handleStreamSong(song)}>
+                        <Image source={{ uri: song.thumbnail || song.artwork }} style={styles.quickPickArtwork} contentFit="cover" />
+                        <View style={styles.quickPickTextContainer}>
+                          <Text style={styles.quickPickTitle} numberOfLines={1}>{song.title || song.filename}</Text>
+                          <Text style={styles.quickPickArtist} numberOfLines={1}>{song.artist}</Text>
+                        </View>
+                        <TouchableOpacity style={{ padding: 8 }}>
+                          <Ionicons name="ellipsis-vertical" size={20} color="#fff" />
+                        </TouchableOpacity>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                ))}
+              </ScrollView>
+            </View>
 
-            {/* Vertical List */}
+            {/* Speed dial / Recently Played Grid List */}
             <View style={styles.listContainer}>
-              <Text style={styles.sectionTitle}>Top hits 2023</Text>
-              {(historyData?.history?.length ? historyData.history : tracks).map((song: any, i: number) => (
-                <TouchableOpacity key={song.videoId || song.id || i} style={styles.listItem} onPress={() => handleStreamSong(song)}>
-                  <Image source={{ uri: song.thumbnail || song.artwork }} style={styles.listArtwork} contentFit="cover" />
-                  <View style={styles.listRankContainer}>
-                    <Text style={styles.listRank}>#{i + 1}</Text>
-                  </View>
-                  <View style={styles.listTextContainer}>
-                    <Text style={styles.listTitle} numberOfLines={1}>{song.title || song.filename}</Text>
-                    <Text style={styles.listArtist} numberOfLines={1}>{song.artist}</Text>
-                  </View>
-                  <Ionicons name="ellipsis-vertical" size={20} color="rgba(255,255,255,0.6)" />
-                </TouchableOpacity>
-              ))}
+              <Text style={styles.sectionTitle}>Recently played</Text>
+              <View style={styles.gridContainer}>
+                {(recentlyPlayedDb.length > 0 ? recentlyPlayedDb : (historyData?.history?.length ? historyData.history : tracks)).slice(0, 9).map((song: any, i: number) => (
+                  <TouchableOpacity key={song.videoId || song.id || i} style={styles.speedDialItem} onPress={() => handleStreamSong(song)}>
+                    <Image source={{ uri: song.thumbnail || song.artwork }} style={styles.speedDialArtwork} contentFit="cover" />
+                  </TouchableOpacity>
+                ))}
+              </View>
             </View>
           </ScrollView>
         )}
@@ -604,52 +658,87 @@ const styles = StyleSheet.create({
     marginBottom: 20,
   },
   tabsContainer: {
-    paddingHorizontal: 20,
     marginBottom: 20,
+    marginTop: 10,
+  },
+  tabItem: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    borderRadius: 8,
+    marginRight: 10,
+  },
+  tabItemActive: {
+    backgroundColor: '#fff',
   },
   tabText: {
-    fontSize: 15,
+    fontSize: 14,
     fontWeight: '600',
-    color: 'rgba(255,255,255,0.5)',
-    marginRight: 20,
+    color: '#fff',
   },
   tabTextActive: {
-    color: '#fff',
+    color: '#000',
   },
-  featuredContainer: {
+  quickPicksSection: {
+    marginBottom: 32,
+  },
+  sectionHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
     paddingHorizontal: 20,
-    marginBottom: 30,
+    marginBottom: 16,
   },
-  featuredCard: {
-    width: 150,
-    marginRight: 16,
-  },
-  featuredArtwork: {
-    width: 150,
-    height: 150,
+  playAllBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.3)',
     borderRadius: 16,
-    marginBottom: 10,
   },
-  featuredTitle: {
+  playAllText: {
     color: '#fff',
-    fontSize: 14,
-    fontWeight: '700',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  quickPickColumn: {
+    width: SCREEN_WIDTH * 0.85,
+    marginRight: 16,
+    flexDirection: 'column',
+    gap: 12,
+  },
+  quickPickItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  quickPickArtwork: {
+    width: 48,
+    height: 48,
+    borderRadius: 4,
+    marginRight: 12,
+  },
+  quickPickTextContainer: {
+    flex: 1,
+    justifyContent: 'center',
+  },
+  quickPickTitle: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '600',
     marginBottom: 4,
   },
-  featuredArtist: {
+  quickPickArtist: {
     color: 'rgba(255,255,255,0.5)',
-    fontSize: 12,
-    textTransform: 'uppercase',
+    fontSize: 13,
   },
   listContainer: {
     paddingHorizontal: 20,
     paddingBottom: 100, // padding for bottom nav
   },
-  sectionTitle: {
-    fontSize: 20,
-    fontWeight: '700',
-    color: '#fff',
-    marginBottom: 16,
+  recentSearchItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 12,
   },
   listItem: {
     flexDirection: 'row',
@@ -660,29 +749,52 @@ const styles = StyleSheet.create({
     width: 50,
     height: 50,
     borderRadius: 8,
-    marginRight: 12,
-  },
-  listRankContainer: {
-    width: 24,
-  },
-  listRank: {
-    color: '#ff4d4d',
-    fontSize: 14,
-    fontWeight: '700',
   },
   listTextContainer: {
     flex: 1,
-    marginRight: 10,
+    marginLeft: 12,
   },
   listTitle: {
     color: '#fff',
-    fontSize: 15,
+    fontSize: 16,
     fontWeight: '600',
     marginBottom: 4,
   },
   listArtist: {
     color: 'rgba(255,255,255,0.5)',
+    fontSize: 14,
+  },
+  sectionTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#fff',
+    marginBottom: 16,
+  },
+  gridContainer: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+  },
+  speedDialItem: {
+    width: (SCREEN_WIDTH - 40 - 20) / 3,
+    aspectRatio: 1,
+    borderRadius: 8,
+    overflow: 'hidden',
+  },
+  speedDialArtwork: {
+    width: '100%',
+    height: '100%',
+  },
+
+  gridTitle: {
+    color: '#fff',
     fontSize: 13,
+    fontWeight: '600',
+    marginBottom: 2,
+  },
+  gridArtist: {
+    color: 'rgba(255,255,255,0.5)',
+    fontSize: 11,
   },
   bottomNav: {
     position: 'absolute',
@@ -730,7 +842,7 @@ const styles = StyleSheet.create({
   },
   heroArtworkArea: {
     alignItems: 'center',
-    marginBottom: 40,
+    marginBottom: 50,
   },
   heroArtwork: {
     width: SCREEN_WIDTH * 0.85,
@@ -739,12 +851,12 @@ const styles = StyleSheet.create({
   },
   heroInfoPanel: {
     paddingHorizontal: 30,
-    flex: 1,
+    paddingBottom: 20,
   },
   heroInfoRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 30,
+    marginBottom: 40,
   },
   heroInfoTitle: {
     color: '#fff',
@@ -761,7 +873,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginBottom: 30,
+    marginBottom: 70,
   },
   waveformTime: {
     color: 'rgba(255,255,255,0.6)',
@@ -774,17 +886,17 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     marginHorizontal: 10,
-    height: 30,
+    height: 60,
   },
   waveformBar: {
-    width: 3,
+    width: 4,
     borderRadius: 2,
   },
   heroControls: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginBottom: 40,
+    marginBottom: 50,
   },
   heroPlayBtn: {
     width: 64,
