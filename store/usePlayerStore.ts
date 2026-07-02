@@ -6,6 +6,7 @@ export interface AudioTrack {
   filename: string;
   uri: string;
   duration: number;
+  artwork?: string | null;
   [key: string]: any;
 }
 
@@ -21,8 +22,13 @@ export interface PlayerState {
   setIsPlaying: (isPlaying: boolean) => void;
   setSound: (sound: any | null) => void;
   updateProgress: (position: number, duration: number) => void;
+  updateTrackArtwork: (trackId: string, artwork: string | null) => void;
   nextTrack: () => void;
   prevTrack: () => void;
+  favorites: string[];
+  toggleFavorite: (id: string) => void;
+  isHeroOpen: boolean;
+  setIsHeroOpen: (isOpen: boolean) => void;
 }
 
 export const usePlayerStore = create<PlayerState>((set, get) => ({
@@ -32,6 +38,16 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
   sound: null,
   position: 0,
   duration: 0,
+  favorites: [],
+  isHeroOpen: false,
+
+  setIsHeroOpen: (isOpen) => set({ isHeroOpen: isOpen }),
+
+  toggleFavorite: (id) => set((state) => ({
+    favorites: state.favorites.includes(id) 
+      ? state.favorites.filter(favId => favId !== id)
+      : [...state.favorites, id]
+  })),
 
   setTracks: (tracks) => set({ tracks }),
   
@@ -42,6 +58,11 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
   setSound: (sound) => set({ sound }),
   
   updateProgress: (position, duration) => set({ position, duration }),
+
+  updateTrackArtwork: (trackId, artwork) =>
+    set((state) => ({
+      tracks: state.tracks.map((t) => (t.id === trackId ? { ...t, artwork } : t)),
+    })),
 
   nextTrack: () => {
     const { currentTrackIndex, tracks } = get();

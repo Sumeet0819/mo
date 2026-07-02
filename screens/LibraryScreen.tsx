@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useCallback, useLayoutEffect, memo } from 'react';
 import {
   View,
   Text,
@@ -8,17 +8,16 @@ import {
   ScrollView,
   TouchableOpacity,
   Dimensions,
-  Platform,
+  Pressable,
+  TextInput,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useLocalMusic } from '../hooks/useLocalMusic';
-import { usePlayerStore } from '../store/usePlayerStore';
-import { playSound } from '../services/audioService';
-import { MiniPlayer } from '../components/MiniPlayer';
+
+import { usePlayerStore, AudioTrack } from '../store/usePlayerStore';
+import { playSound, seekSound, togglePlayPause } from '../services/audioService';
 import { theme } from '../constants/theme';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
-import { MotiView, AnimatePresence } from 'moti';
 import Animated, {
   useSharedValue,
   useAnimatedStyle,
@@ -26,34 +25,25 @@ import Animated, {
   interpolate,
   Extrapolation,
   runOnJS,
+  cancelAnimation,
 } from 'react-native-reanimated';
-import { PanGestureHandler } from 'react-native-gesture-handler';
 import { Image } from 'expo-image';
+import { useGetLibrarySongsQuery, useLazySearchMusicQuery, BASE_URL, useGetListeningHistoryQuery } from '../store/api/youtubeMusicApi';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
-const CARD_WIDTH = SCREEN_WIDTH * 0.85;
-const CARD_HEIGHT = 320;
-const CARD_BORDER_RADIUS = 36;
 
-const CARD_COLORS = ['#FA8094', '#E6E2D0', '#9FF843', '#39E1EA', '#A855F7'];
-
-// iOS-style spring: smooth, slightly underdamped, never mechanical
 const EXPAND_SPRING: Parameters<typeof withSpring>[1] = {
-  damping: 36,
-  stiffness: 240,
-  mass: 1.0,
+  damping: 32,
+  stiffness: 380,
+  mass: 0.8,
   overshootClamping: false,
-  restDisplacementThreshold: 0.001,
-  restSpeedThreshold: 0.001,
 };
 
 const COLLAPSE_SPRING: Parameters<typeof withSpring>[1] = {
-  damping: 40,
-  stiffness: 320,
-  mass: 0.9,
-  overshootClamping: true, // snap back cleanly, no bounce
-  restDisplacementThreshold: 0.001,
-  restSpeedThreshold: 0.001,
+  damping: 38,
+  stiffness: 420,
+  mass: 0.7,
+  overshootClamping: true,
 };
 
 interface CardLayout {
@@ -65,6 +55,57 @@ interface CardLayout {
   trackIndex: number;
 }
 
+// ── Waveform Progress ──────────────────────────────────────────────────────────
+const WaveformProgress = memo(() => {
+  const position = usePlayerStore((s) => s.position);
+  const trackDuration = usePlayerStore((s) => s.duration);
+  const [barWidth, setBarWidth] = useState(0);
+
+  const progressPercent = trackDuration > 0 ? position / trackDuration : 0;
+  const mins = Math.floor(position / 60);
+  const secs = Math.floor(position % 60);
+  const totalMins = Math.floor(trackDuration / 60);
+  const totalSecs = Math.floor(trackDuration % 60);
+
+  // Generate 35 randomish heights for the fake waveform
+  const bars = Array.from({ length: 35 }).map((_, i) => {
+    // some pseudo-random curve
+    const h = 10 + Math.abs(Math.sin(i * 0.5) * 15) + (i % 3) * 5;
+    return h;
+  });
+
+  return (
+    <View style={styles.waveformRow}>
+      <Text style={styles.waveformTime}>{`${mins}:${String(secs).padStart(2, '0')}`}</Text>
+      
+      <Pressable 
+        style={styles.waveformContainer}
+        onLayout={(e) => setBarWidth(e.nativeEvent.layout.width)}
+        onPress={(e) => {
+          if (barWidth > 0 && trackDuration > 0) {
+            seekSound((e.nativeEvent.locationX / barWidth) * trackDuration);
+          }
+        }}
+      >
+        {bars.map((h, i) => {
+          const isActive = (i / bars.length) <= progressPercent;
+          return (
+            <View 
+              key={i} 
+              style={[
+                styles.waveformBar, 
+                { height: h, backgroundColor: isActive ? '#fff' : 'rgba(255,255,255,0.2)' }
+              ]} 
+            />
+          );
+        })}
+      </Pressable>
+
+      <Text style={styles.waveformTime}>{`${totalMins}:${String(totalSecs).padStart(2, '0')}`}</Text>
+    </View>
+  );
+});
+
 // ── Hero Overlay ────────────────────────────────────────────────────────────
 interface HeroOverlayProps {
   layout: CardLayout;
@@ -73,64 +114,55 @@ interface HeroOverlayProps {
   onClose: () => void;
   isPlaying: boolean;
   onPlayPause: () => void;
+  artistName: string;
 }
 
 const HeroOverlay: React.FC<HeroOverlayProps> = ({
   layout,
   trackName,
-  duration,
   onClose,
   isPlaying,
   onPlayPause,
+  artistName
 }) => {
   const insets = useSafeAreaInsets();
+  const tracks = usePlayerStore((s) => s.tracks);
+  const currentTrackIndex = usePlayerStore((s) => s.currentTrackIndex);
+  const setCurrentTrackIndex = usePlayerStore((s) => s.setCurrentTrackIndex);
 
-  // Start at -1 so the overlay is at scale 0 / invisible on the first render frame,
-  // preventing the 1-frame flash at (0,0) before the spring fires.
+  const currentTrack = tracks[currentTrackIndex];
+  const artworkUri = currentTrack?.artwork || 'https://i.pinimg.com/736x/87/b9/69/87b969ed69c7cc9c3fdebd4da442d6c1.jpg';
+
   const progress = useSharedValue(-1);
   const [canClose, setCanClose] = useState(false);
 
-  React.useEffect(() => {
-    // Fire immediately — Reanimated schedules this before the next frame paint
+  useLayoutEffect(() => {
     progress.value = withSpring(1, EXPAND_SPRING);
-    const t = setTimeout(() => setCanClose(true), 250);
-    return () => clearTimeout(t);
+    const t = setTimeout(() => setCanClose(true), 200);
+    return () => {
+      clearTimeout(t);
+      cancelAnimation(progress);
+    };
   }, []);
 
   const containerStyle = useAnimatedStyle(() => {
-    // Clamp so negative progress values just hold at the card position
+    'worklet';
     const p = Math.max(progress.value, 0);
-    const left   = interpolate(p, [0, 1], [layout.x, 0],          Extrapolation.CLAMP);
-    const top    = interpolate(p, [0, 1], [layout.y, 0],          Extrapolation.CLAMP);
-    const w      = interpolate(p, [0, 1], [layout.width,  SCREEN_WIDTH],  Extrapolation.CLAMP);
-    const h      = interpolate(p, [0, 1], [layout.height, SCREEN_HEIGHT], Extrapolation.CLAMP);
-    const radius = interpolate(p, [0, 1], [CARD_BORDER_RADIUS, 0],        Extrapolation.CLAMP);
-    // While progress < 0 keep the overlay invisible so it never flashes
-    const opacity = progress.value < 0 ? 0 : 1;
-
-    return { left, top, width: w, height: h, borderRadius: radius, opacity };
+    return {
+      left: interpolate(p, [0, 1], [layout.x, 0], Extrapolation.CLAMP),
+      top: interpolate(p, [0, 1], [layout.y, 0], Extrapolation.CLAMP),
+      width: interpolate(p, [0, 1], [layout.width, SCREEN_WIDTH], Extrapolation.CLAMP),
+      height: interpolate(p, [0, 1], [layout.height, SCREEN_HEIGHT], Extrapolation.CLAMP),
+      borderRadius: interpolate(p, [0, 1], [24, 0], Extrapolation.CLAMP),
+      opacity: progress.value < 0 ? 0 : 1,
+    };
   });
 
   const detailContentStyle = useAnimatedStyle(() => {
+    'worklet';
     const p = Math.max(progress.value, 0);
     return {
-      opacity:   interpolate(p, [0.5, 0.88], [0, 1], Extrapolation.CLAMP),
-      transform: [{ translateY: interpolate(p, [0.5, 0.88], [22, 0], Extrapolation.CLAMP) }],
-    };
-  });
-
-  const cardContentStyle = useAnimatedStyle(() => {
-    const p = Math.max(progress.value, 0);
-    return {
-      opacity: interpolate(p, [0, 0.35], [1, 0], Extrapolation.CLAMP),
-    };
-  });
-
-  const closeButtonStyle = useAnimatedStyle(() => {
-    const p = Math.max(progress.value, 0);
-    return {
-      opacity:   interpolate(p, [0.72, 1], [0, 1], Extrapolation.CLAMP),
-      transform: [{ scale: interpolate(p, [0.72, 1], [0.5, 1], Extrapolation.CLAMP) }],
+      opacity: interpolate(p, [0.5, 0.9], [0, 1], Extrapolation.CLAMP),
     };
   });
 
@@ -142,79 +174,89 @@ const HeroOverlay: React.FC<HeroOverlayProps> = ({
     });
   };
 
+  const handleNext = () => {
+    if (currentTrackIndex < tracks.length - 1) {
+      setCurrentTrackIndex(currentTrackIndex + 1);
+    }
+  };
+
+  const handlePrev = () => {
+    if (currentTrackIndex > 0) {
+      setCurrentTrackIndex(currentTrackIndex - 1);
+    }
+  };
+
   return (
-    <Animated.View
-      style={[styles.heroOverlay, { backgroundColor: layout.color }, containerStyle]}
-    >
-      {/* Original card content fades out */}
-      <Animated.View style={[StyleSheet.absoluteFill, cardContentStyle]}>
-        <View style={styles.heroCardLogo}>
-          <Text style={styles.heroCardLogoText}>K.</Text>
-        </View>
-        <View style={styles.heroCardTextContainer}>
-          <Text style={styles.heroCardSubtitleTop}>AURAMUSIC</Text>
-          <Text style={styles.heroCardTitle} numberOfLines={2}>
-            {trackName}
-          </Text>
-          <Text style={styles.heroCardSubtitle}>{duration}</Text>
-          <View style={styles.seeDetailsBtn}>
-            <Text style={styles.seeDetailsText}>Play Track</Text>
-          </View>
-        </View>
-      </Animated.View>
-
-      {/* Detail content fades in after expansion */}
+    <Animated.View style={[styles.heroOverlay, containerStyle]}>
       <Animated.View style={[StyleSheet.absoluteFill, detailContentStyle]}>
-        {/* Artwork fills top portion */}
-        <View style={[styles.heroArtworkArea, { paddingTop: insets.top + 60 }]}>
-          <View style={styles.heroArtworkShadow}>
-            <Image
-              source={{ uri: 'https://i.pinimg.com/736x/87/b9/69/87b969ed69c7cc9c3fdebd4da442d6c1.jpg' }}
-              style={styles.heroArtwork}
-              contentFit="cover"
-            />
-          </View>
+        
+        {/* Soft Glow */}
+        <LinearGradient 
+          colors={['rgba(255, 100, 150, 0.15)', 'transparent']} 
+          style={StyleSheet.absoluteFill} 
+          pointerEvents="none"
+        />
+
+        {/* Header */}
+        <View style={[styles.heroHeader, { marginTop: insets.top + 10 }]}>
+          <TouchableOpacity onPress={handleClose} hitSlop={{ top: 20, bottom: 20, left: 20, right: 20 }}>
+            <Ionicons name="arrow-back" size={24} color="#fff" />
+          </TouchableOpacity>
+          <Text style={styles.heroHeaderText}>Now Playing</Text>
+          <TouchableOpacity hitSlop={{ top: 20, bottom: 20, left: 20, right: 20 }}>
+            <Ionicons name="ellipsis-horizontal" size={24} color="#fff" />
+          </TouchableOpacity>
         </View>
 
-        {/* Bottom info panel */}
+        {/* Artwork */}
+        <View style={styles.heroArtworkArea}>
+          <Image source={{ uri: artworkUri }} style={styles.heroArtwork} contentFit="cover" />
+        </View>
+
+        {/* Info & Controls */}
         <View style={styles.heroInfoPanel}>
-          <Text style={styles.heroInfoLabel}>AURAMUSIC</Text>
-          <Text style={styles.heroInfoTitle} numberOfLines={2}>
-            {trackName}
-          </Text>
-          <Text style={styles.heroInfoDuration}>{duration}</Text>
-
-          {/* Fake progress bar */}
-          <View style={styles.heroProgressBg}>
-            <View style={[styles.heroProgressFill, { width: '35%' }]} />
-          </View>
-          <View style={styles.heroTimeRow}>
-            <Text style={styles.heroTimeText}>1:20</Text>
-            <Text style={styles.heroTimeText}>-2:15</Text>
+          
+          <View style={styles.heroInfoRow}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.heroInfoTitle} numberOfLines={1}>{trackName}</Text>
+              <Text style={styles.heroInfoArtist} numberOfLines={1}>{artistName}</Text>
+            </View>
+            <TouchableOpacity>
+              <Ionicons name="heart-outline" size={28} color="#fff" />
+            </TouchableOpacity>
           </View>
 
-          {/* Controls */}
+          <WaveformProgress />
+
           <View style={styles.heroControls}>
-            <TouchableOpacity style={styles.heroSecBtn}>
-              <Ionicons name="play-skip-back" size={30} color="rgba(0,0,0,0.7)" />
+            <TouchableOpacity>
+              <Ionicons name="shuffle" size={24} color="#fff" />
             </TouchableOpacity>
+            <TouchableOpacity onPress={handlePrev}>
+              <Ionicons name="play-skip-back" size={32} color="#fff" />
+            </TouchableOpacity>
+            
             <TouchableOpacity onPress={onPlayPause} style={styles.heroPlayBtn}>
-              <Ionicons name={isPlaying ? 'pause' : 'play'} size={36} color={layout.color} />
+              <Ionicons name={isPlaying ? 'pause' : 'play'} size={32} color="#000" />
             </TouchableOpacity>
-            <TouchableOpacity style={styles.heroSecBtn}>
-              <Ionicons name="play-skip-forward" size={30} color="rgba(0,0,0,0.7)" />
+            
+            <TouchableOpacity onPress={handleNext}>
+              <Ionicons name="play-skip-forward" size={32} color="#fff" />
+            </TouchableOpacity>
+            <TouchableOpacity>
+              <Ionicons name="repeat" size={24} color="#fff" />
             </TouchableOpacity>
           </View>
-        </View>
-      </Animated.View>
 
-      {/* Close button */}
-      <Animated.View style={[styles.closeButton, { top: insets.top + 12 }, closeButtonStyle]}>
-        <TouchableOpacity onPress={handleClose} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
-          <View style={styles.closeButtonInner}>
-            <Ionicons name="chevron-down" size={22} color="rgba(0,0,0,0.6)" />
+          {/* Lyrics Button */}
+          <View style={styles.lyricsContainer}>
+            <TouchableOpacity style={styles.lyricsBtn}>
+              <Text style={styles.lyricsBtnText}>Lyrics</Text>
+              <Ionicons name="chevron-down" size={16} color="#fff" style={{ marginLeft: 4 }} />
+            </TouchableOpacity>
           </View>
-        </TouchableOpacity>
+
+        </View>
       </Animated.View>
     </Animated.View>
   );
@@ -222,67 +264,89 @@ const HeroOverlay: React.FC<HeroOverlayProps> = ({
 
 // ── LibraryScreen ────────────────────────────────────────────────────────────
 export const LibraryScreen: React.FC = () => {
-  const { loading, scanLocalFiles } = useLocalMusic();
-  const { tracks, currentTrackIndex, isPlaying, setCurrentTrackIndex } = usePlayerStore();
-  const [swipeDirection, setSwipeDirection] = useState<'up' | 'down'>('up');
+  const { tracks, currentTrackIndex, isPlaying, setTracks, setCurrentTrackIndex, setIsHeroOpen } = usePlayerStore();
+  const [activeTab, setActiveTab] = useState('Popular');
+  const [isSearchActive, setIsSearchActive] = useState(false);
 
-  // Hero state
-  const [heroLayout, setHeroLayout] = useState<CardLayout | null>(null);
-  const cardRefs = useRef<Record<number, View | null>>({});
+  const { data: cloudLibrary, isLoading: isCloudLoading } = useGetLibrarySongsQuery();
+  const { data: historyData, isLoading: isHistoryLoading } = useGetListeningHistoryQuery();
 
-  const handleNextTrack = () => {
-    if (tracks.length > 0) {
-      const next = (currentTrackIndex + 1) % tracks.length;
-      setCurrentTrackIndex(next);
-      playSound(tracks[next].uri);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [triggerSearch, { data: searchResults, isFetching: isSearchLoading }] = useLazySearchMusicQuery();
+
+  const insets = useSafeAreaInsets();
+
+  React.useEffect(() => {
+    let sourceData = cloudLibrary?.songs || [];
+    if (sourceData.length === 0 && historyData?.history) {
+      sourceData = historyData.history;
     }
-  };
-
-  const onHandlerStateChange = (event: any) => {
-    if (event.nativeEvent.state === 5) {
-      const { translationY, translationX } = event.nativeEvent;
-      if (translationY < -40 || translationX < -40) {
-        setSwipeDirection('up');
-        handleNextTrack();
-      } else if (translationY > 40 || translationX > 40) {
-        setSwipeDirection('down');
-        handleNextTrack();
+    
+    if (sourceData && sourceData.length > 0) {
+      const newTracks: AudioTrack[] = sourceData.map((song: any) => ({
+        id: song.videoId || song.id,
+        filename: song.title,
+        uri: `${BASE_URL}/stream/${song.videoId || song.id}`,
+        duration: song.duration || 0,
+        artwork: song.thumbnail,
+        artist: song.artist || 'YouTube Music',
+      }));
+      
+      const currentTrackIds = tracks.map(t => t.id).join(',');
+      const newTrackIds = newTracks.map(t => t.id).join(',');
+      if (currentTrackIds !== newTrackIds) {
+        setTracks(newTracks);
+        setCurrentTrackIndex(0);
       }
     }
+  }, [historyData, cloudLibrary, tracks.length]);
+
+  const [heroLayout, setHeroLayout] = useState<CardLayout | null>(null);
+
+  const openHero = (index: number) => {
+    // For simplicity, just pop it from center if no ref
+    setHeroLayout({
+      x: SCREEN_WIDTH / 2 - 100,
+      y: SCREEN_HEIGHT / 2 - 100,
+      width: 200,
+      height: 200,
+      color: '#121212',
+      trackIndex: index,
+    });
+    setIsHeroOpen(true);
   };
-
-  const openHero = useCallback(
-    (index: number, trackIndex: number) => {
-      const ref = cardRefs.current[index];
-      if (!ref) return;
-
-      ref.measure((fx, fy, w, h, px, py) => {
-        setHeroLayout({
-          x: px,
-          y: py,
-          width: w,
-          height: h,
-          color: CARD_COLORS[trackIndex % CARD_COLORS.length],
-          trackIndex,
-        });
-        setCurrentTrackIndex(trackIndex);
-        playSound(tracks[trackIndex].uri);
-      });
-    },
-    [tracks, setCurrentTrackIndex]
-  );
 
   const closeHero = useCallback(() => {
     setHeroLayout(null);
-  }, []);
+    setIsHeroOpen(false);
+  }, [setIsHeroOpen]);
 
-  if (loading) {
-    return (
-      <View style={styles.center}>
-        <ActivityIndicator size="large" color={theme.accent} />
-      </View>
-    );
-  }
+  const handleStreamSong = (song: any) => {
+    const newTrack: AudioTrack = {
+      id: song.videoId || song.id,
+      filename: song.title,
+      uri: `${BASE_URL}/stream/${song.videoId || song.id}`,
+      duration: song.duration || 0,
+      artwork: song.thumbnail,
+      artist: song.artist || 'YouTube Music',
+    };
+
+    const existsIndex = tracks.findIndex(t => t.id === newTrack.id);
+    let targetIndex = tracks.length;
+
+    if (existsIndex >= 0) {
+      targetIndex = existsIndex;
+    } else {
+      setTracks([newTrack, ...tracks]);
+      targetIndex = 0;
+    }
+
+    setCurrentTrackIndex(targetIndex);
+    playSound(newTrack.uri);
+    
+    // open Hero automatically
+    openHero(targetIndex);
+  };
 
   const currentTrack = tracks[currentTrackIndex] ?? null;
   const heroDuration = currentTrack
@@ -293,184 +357,132 @@ export const LibraryScreen: React.FC = () => {
     <View style={styles.container}>
       <StatusBar barStyle="light-content" translucent backgroundColor="transparent" />
 
-      <LinearGradient colors={['#4C1D95', 'transparent']} style={styles.headerGradient} />
-
       <SafeAreaView style={{ flex: 1 }}>
-        {/* Header */}
-        <View style={styles.header}>
-          <View style={styles.avatar}>
-            <Text style={{ color: '#fff', fontWeight: '700', fontSize: 16 }}>S</Text>
-          </View>
-          <Text style={styles.greeting}>Hi, Samantha</Text>
-          <View style={styles.headerActions}>
-            <View style={styles.iconButton}>
-              <Ionicons name="search" size={20} color={theme.textPrimary} />
+        {/* Top Header */}
+        <View style={styles.browseHeader}>
+          {isSearchActive ? (
+            <View style={styles.searchBarContainer}>
+              <TouchableOpacity onPress={() => setIsSearchActive(false)}>
+                <Ionicons name="arrow-back" size={20} color="#fff" style={styles.searchIcon} />
+              </TouchableOpacity>
+              <TextInput
+                style={styles.searchInput}
+                placeholder="Search songs..."
+                placeholderTextColor="rgba(255,255,255,0.5)"
+                value={searchQuery}
+                onChangeText={setSearchQuery}
+                onSubmitEditing={() => triggerSearch({ q: searchQuery })}
+                returnKeyType="search"
+                autoFocus
+              />
+              {searchQuery.length > 0 && (
+                <TouchableOpacity onPress={() => { setSearchQuery(''); triggerSearch({ q: '' }); }}>
+                  <Ionicons name="close-circle" size={20} color="rgba(255,255,255,0.5)" />
+                </TouchableOpacity>
+              )}
             </View>
-            <View style={styles.iconButton}>
-              <Ionicons name="heart-outline" size={20} color={theme.textPrimary} />
-            </View>
-          </View>
-        </View>
-
-        {/* Chips */}
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.chipsContainer}>
-          <View style={[styles.chip, styles.chipActive]}>
-            <Text style={styles.chipTextActive}>All</Text>
-          </View>
-          <View style={styles.chip}>
-            <Text style={styles.chipText}>Local Files</Text>
-          </View>
-          <View style={styles.chip}>
-            <Text style={styles.chipText}>Trending</Text>
-          </View>
-        </ScrollView>
-
-        <View style={styles.headerRow}>
-          <Text style={styles.sectionTitle}>Your Local Library</Text>
-          <TouchableOpacity onPress={scanLocalFiles} style={styles.scanButton}>
-            <Ionicons name="search" size={16} color="#000" />
-            <Text style={styles.scanButtonText}>Scan</Text>
-          </TouchableOpacity>
-        </View>
-
-        {/* Stacked Card Carousel */}
-        {tracks.length === 0 ? (
-          <View style={styles.center}>
-            <Text style={styles.emptyText}>No local audio files found.</Text>
-            <TouchableOpacity onPress={scanLocalFiles} style={styles.largeScanButton}>
-              <Text style={styles.largeScanButtonText}>Scan Device</Text>
-            </TouchableOpacity>
-          </View>
-        ) : (
-          <View style={styles.carouselContainer}>
-            <PanGestureHandler onHandlerStateChange={onHandlerStateChange}>
-              <View style={{ flex: 1, alignItems: 'center', marginTop: 150 }}>
-                <AnimatePresence>
-                  {tracks.map((item, index) => {
-                    const stackIndex = (index - currentTrackIndex + tracks.length) % tracks.length;
-                    const isJustSwiped = stackIndex === tracks.length - 1;
-                    if (stackIndex > 3 && !isJustSwiped) return null;
-
-                    const isCurrent = stackIndex === 0;
-                    const cardColor = CARD_COLORS[index % CARD_COLORS.length];
-
-                    let targetTranslateY = -stackIndex * 55;
-                    let targetScale = 1 - stackIndex * 0.06;
-                    let targetRotateX = `${-stackIndex * 5}deg`;
-                    let targetOpacity = 1;
-                    let zIndex = tracks.length - stackIndex;
-
-                    if (isJustSwiped) {
-                      if (swipeDirection === 'down') {
-                        targetTranslateY = 500;
-                        targetScale = 1.3;
-                        targetOpacity = 0;
-                        targetRotateX = '20deg';
-                        zIndex = 999;
-                      } else {
-                        targetTranslateY = -250;
-                        targetScale = 0.5;
-                        targetOpacity = 0;
-                        targetRotateX = '-20deg';
-                      }
-                    }
-
-                    return (
-                      <MotiView
-                        key={item.id}
-                        animate={{
-                          translateY: targetTranslateY,
-                          scale: targetScale,
-                          rotateX: targetRotateX,
-                          opacity: targetOpacity,
-                        }}
-                        transition={{
-                          type: 'spring',
-                          damping: 20,
-                          stiffness: 160,
-                          mass: 0.9,
-                        }}
-                        style={[
-                          styles.stackedCardWrapper,
-                          { position: 'absolute', zIndex },
-                        ]}
-                      >
-                        <TouchableOpacity
-                          activeOpacity={0.95}
-                          onPress={() => {
-                            if (isCurrent) {
-                              openHero(index, index);
-                            } else {
-                              setCurrentTrackIndex(index);
-                            }
-                          }}
-                        >
-                          <View
-                            ref={(r) => {
-                              cardRefs.current[index] = r;
-                            }}
-                            style={[
-                              styles.stackedCard,
-                              { backgroundColor: cardColor, shadowColor: cardColor },
-                            ]}
-                          >
-                            {/* Logo */}
-                            <View style={styles.cardLogo}>
-                              <Text style={styles.cardLogoText}>K.</Text>
-                            </View>
-
-                            {/* Card text */}
-                            <View style={styles.cardTextContainer}>
-                              <Text style={styles.cardSubtitleTop}>AURAMUSIC</Text>
-                              <Text style={styles.cardTitle} numberOfLines={2}>
-                                {item.filename.replace(/\.[^/.]+$/, '')}
-                              </Text>
-                              <Text style={styles.cardSubtitle}>
-                                {Math.floor(item.duration / 60)}:
-                                {String(Math.floor(item.duration % 60)).padStart(2, '0')}
-                              </Text>
-                              <View style={styles.seeDetailsBtn}>
-                                <Text style={styles.seeDetailsText}>Play Track</Text>
-                              </View>
-                            </View>
-
-                            {/* Playing indicator */}
-                            {isCurrent && isPlaying && (
-                              <MotiView
-                                from={{ scale: 0.8, opacity: 0.5 }}
-                                animate={{ scale: 1.1, opacity: 1 }}
-                                transition={{ loop: true, type: 'timing', duration: 800 }}
-                                style={styles.playingIndicator}
-                              >
-                                <Ionicons name="stats-chart" size={24} color="#000" />
-                              </MotiView>
-                            )}
-                          </View>
-                        </TouchableOpacity>
-                      </MotiView>
-                    );
-                  })}
-                </AnimatePresence>
+          ) : (
+            <>
+              <TouchableOpacity onPress={() => setIsSearchActive(true)} style={styles.iconBtn}>
+                <Ionicons name="search" size={24} color="#fff" />
+              </TouchableOpacity>
+              <View style={styles.headerRight}>
+                <TouchableOpacity style={styles.iconBtn}>
+                  <Ionicons name="notifications-outline" size={24} color="#fff" />
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.iconBtn}>
+                  <Ionicons name="settings-outline" size={24} color="#fff" />
+                </TouchableOpacity>
               </View>
-            </PanGestureHandler>
-          </View>
+            </>
+          )}
+        </View>
+
+        {!isSearchActive && (
+          <Text style={styles.mainTitle}>Browse</Text>
         )}
+
+        {isSearchActive ? (
+          <ScrollView contentContainerStyle={{ paddingHorizontal: 20, paddingTop: 10 }}>
+            {isSearchLoading ? (
+               <ActivityIndicator size="large" color="#fff" style={{ marginTop: 20 }} />
+            ) : searchResults?.results && searchResults.results.length > 0 ? (
+               <View>
+                 {searchResults.results.map((song: any) => (
+                   <TouchableOpacity key={song.videoId} onPress={() => { setIsSearchActive(false); handleStreamSong(song); }} style={styles.listItem}>
+                     <Image source={{ uri: song.thumbnail }} style={styles.listArtwork} contentFit="cover" />
+                     <View style={styles.listTextContainer}>
+                       <Text style={styles.listTitle} numberOfLines={1}>{song.title}</Text>
+                       <Text style={styles.listArtist} numberOfLines={1}>{song.artist}</Text>
+                     </View>
+                     <Ionicons name="ellipsis-vertical" size={20} color="rgba(255,255,255,0.6)" />
+                   </TouchableOpacity>
+                 ))}
+               </View>
+            ) : null}
+          </ScrollView>
+        ) : (
+          <ScrollView>
+            {/* Tabs */}
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.tabsContainer}>
+              {['Popular', 'New', 'Trend', 'Podcasts', 'Favourites'].map(tab => (
+                <TouchableOpacity key={tab} onPress={() => setActiveTab(tab)}>
+                  <Text style={[styles.tabText, activeTab === tab && styles.tabTextActive]}>{tab}</Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+
+            {/* Horizontal Featured */}
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.featuredContainer}>
+              {(cloudLibrary?.songs?.length ? cloudLibrary.songs : tracks).map((song: any, i: number) => (
+                <TouchableOpacity key={song.id || i} style={styles.featuredCard} onPress={() => handleStreamSong(song)}>
+                  <Image source={{ uri: song.thumbnail || song.artwork }} style={styles.featuredArtwork} contentFit="cover" />
+                  <Text style={styles.featuredTitle} numberOfLines={1}>{song.title || song.filename}</Text>
+                  <Text style={styles.featuredArtist} numberOfLines={1}>{song.artist}</Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+
+            {/* Vertical List */}
+            <View style={styles.listContainer}>
+              <Text style={styles.sectionTitle}>Top hits 2023</Text>
+              {(historyData?.history?.length ? historyData.history : tracks).map((song: any, i: number) => (
+                <TouchableOpacity key={song.videoId || song.id || i} style={styles.listItem} onPress={() => handleStreamSong(song)}>
+                  <Image source={{ uri: song.thumbnail || song.artwork }} style={styles.listArtwork} contentFit="cover" />
+                  <View style={styles.listRankContainer}>
+                    <Text style={styles.listRank}>#{i + 1}</Text>
+                  </View>
+                  <View style={styles.listTextContainer}>
+                    <Text style={styles.listTitle} numberOfLines={1}>{song.title || song.filename}</Text>
+                    <Text style={styles.listArtist} numberOfLines={1}>{song.artist}</Text>
+                  </View>
+                  <Ionicons name="ellipsis-vertical" size={20} color="rgba(255,255,255,0.6)" />
+                </TouchableOpacity>
+              ))}
+            </View>
+          </ScrollView>
+        )}
+
+        {/* Bottom Nav Placeholder */}
+        <View style={styles.bottomNav}>
+          <Ionicons name="home" size={24} color="#fff" />
+          <Ionicons name="book-outline" size={24} color="rgba(255,255,255,0.5)" />
+          <Ionicons name="person-outline" size={24} color="rgba(255,255,255,0.5)" />
+        </View>
+
+
       </SafeAreaView>
 
-      <MiniPlayer />
-
-      {/* Hero Overlay — rendered at the root so it covers everything */}
+      {/* Hero Overlay */}
       {heroLayout && currentTrack && (
         <HeroOverlay
           layout={heroLayout}
           trackName={currentTrack.filename.replace(/\.[^/.]+$/, '')}
+          artistName={currentTrack.artist}
           duration={heroDuration}
           onClose={closeHero}
           isPlaying={isPlaying}
-          onPlayPause={() => {
-            const { togglePlayPause } = require('../services/audioService');
-            togglePlayPause();
-          }}
+          onPlayPause={togglePlayPause}
         />
       )}
     </View>
@@ -478,312 +490,231 @@ export const LibraryScreen: React.FC = () => {
 };
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: theme.bg },
-
-  headerGradient: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    height: 350,
-  },
-
-  header: {
+  container: { flex: 1, backgroundColor: '#121212' },
+  browseHeader: {
     flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-    marginTop: 20,
-  },
-  avatar: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    marginRight: 12,
-    backgroundColor: '#7C3AED',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  greeting: {
-    fontSize: 28,
-    fontWeight: '700',
-    color: theme.textPrimary,
-    flex: 1,
-  },
-  headerActions: { flexDirection: 'row', gap: 10 },
-  iconButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: 'rgba(255,255,255,0.1)',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-
-  chipsContainer: {
-    paddingHorizontal: 20,
-    marginTop: 25,
-    marginBottom: 20,
-    flexDirection: 'row',
-    maxHeight: 40,
-  },
-  chip: {
-    paddingHorizontal: 18,
-    paddingVertical: 8,
-    borderRadius: 20,
-    backgroundColor: 'rgba(255,255,255,0.1)',
-    marginRight: 10,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  chipActive: { backgroundColor: theme.accent },
-  chipText: { color: theme.textSecondary, fontSize: 14, fontWeight: '500' },
-  chipTextActive: { color: theme.textDark, fontSize: 14, fontWeight: '600' },
-
-  sectionTitle: { fontSize: 24, fontWeight: '700', color: theme.textPrimary },
-  headerRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
     justifyContent: 'space-between',
-    marginHorizontal: 20,
-    marginTop: 20,
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    marginTop: 10,
+    height: 50,
+  },
+  headerRight: { flexDirection: 'row', gap: 15 },
+  iconBtn: { padding: 5 },
+  mainTitle: {
+    fontSize: 32,
+    fontWeight: '700',
+    color: '#fff',
+    paddingHorizontal: 20,
+    marginTop: 10,
+    marginBottom: 20,
+  },
+  tabsContainer: {
+    paddingHorizontal: 20,
+    marginBottom: 20,
+  },
+  tabText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: 'rgba(255,255,255,0.5)',
+    marginRight: 20,
+  },
+  tabTextActive: {
+    color: '#fff',
+  },
+  featuredContainer: {
+    paddingHorizontal: 20,
+    marginBottom: 30,
+  },
+  featuredCard: {
+    width: 150,
+    marginRight: 16,
+  },
+  featuredArtwork: {
+    width: 150,
+    height: 150,
+    borderRadius: 16,
     marginBottom: 10,
   },
-  scanButton: {
+  featuredTitle: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '700',
+    marginBottom: 4,
+  },
+  featuredArtist: {
+    color: 'rgba(255,255,255,0.5)',
+    fontSize: 12,
+    textTransform: 'uppercase',
+  },
+  listContainer: {
+    paddingHorizontal: 20,
+    paddingBottom: 100, // padding for bottom nav
+  },
+  sectionTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#fff',
+    marginBottom: 16,
+  },
+  listItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: theme.accent,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 20,
-    gap: 4,
+    marginBottom: 16,
   },
-  scanButtonText: { color: '#000', fontSize: 12, fontWeight: '700' },
-
-  largeScanButton: {
-    marginTop: 20,
-    backgroundColor: theme.accent,
-    paddingHorizontal: 24,
-    paddingVertical: 12,
-    borderRadius: 30,
+  listArtwork: {
+    width: 50,
+    height: 50,
+    borderRadius: 8,
+    marginRight: 12,
   },
-  largeScanButtonText: { color: '#000', fontSize: 16, fontWeight: '700' },
-
-  carouselContainer: { marginTop: 10, flex: 1 },
-
-  stackedCardWrapper: {
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 15 },
-    shadowOpacity: 0.35,
-    shadowRadius: 25,
-    elevation: 10,
+  listRankContainer: {
+    width: 24,
   },
-  stackedCard: {
-    width: CARD_WIDTH,
-    height: CARD_HEIGHT,
-    borderRadius: CARD_BORDER_RADIUS,
-    overflow: 'hidden',
-    padding: 24,
+  listRank: {
+    color: '#ff4d4d',
+    fontSize: 14,
+    fontWeight: '700',
   },
-
-  cardLogo: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: '#000',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 'auto',
-  },
-  cardLogoText: { color: '#FFF', fontSize: 22, fontWeight: '800' },
-  cardTextContainer: { marginTop: 'auto' },
-  cardSubtitleTop: {
-    fontSize: 12,
-    color: 'rgba(0,0,0,0.4)',
-    fontWeight: '800',
-    letterSpacing: 1,
-    marginBottom: 8,
-  },
-  cardTitle: {
-    fontSize: 28,
-    fontWeight: '800',
-    color: '#000',
-    marginBottom: 4,
-    lineHeight: 32,
-  },
-  cardSubtitle: { fontSize: 16, color: '#000', fontWeight: '700', marginBottom: 20 },
-  seeDetailsBtn: {
-    backgroundColor: 'rgba(0,0,0,0.1)',
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 20,
-    alignSelf: 'flex-start',
-  },
-  seeDetailsText: { color: '#000', fontWeight: '700', fontSize: 14 },
-  playingIndicator: {
-    position: 'absolute',
-    bottom: 24,
-    right: 24,
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    backgroundColor: '#FFF',
-    justifyContent: 'center',
-    alignItems: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.2,
-    shadowRadius: 8,
-    elevation: 6,
-  },
-
-  center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
-  emptyText: { color: theme.textSecondary, fontSize: 16 },
-
-  // ── Hero Overlay styles ──────────────────────────────────────────────────
-  heroOverlay: {
-    position: 'absolute',
-    overflow: 'hidden',
-    // zIndex sits above everything
-    zIndex: 9999,
-    elevation: 99,
-  },
-
-  // Card content (mirrors the card layout — fades out during expand)
-  heroCardLogo: {
-    position: 'absolute',
-    top: 24,
-    left: 24,
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: '#000',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  heroCardLogoText: { color: '#FFF', fontSize: 22, fontWeight: '800' },
-  heroCardTextContainer: {
-    position: 'absolute',
-    bottom: 24,
-    left: 24,
-    right: 24,
-  },
-  heroCardSubtitleTop: {
-    fontSize: 12,
-    color: 'rgba(0,0,0,0.4)',
-    fontWeight: '800',
-    letterSpacing: 1,
-    marginBottom: 8,
-  },
-  heroCardTitle: {
-    fontSize: 28,
-    fontWeight: '800',
-    color: '#000',
-    marginBottom: 4,
-    lineHeight: 32,
-  },
-  heroCardSubtitle: { fontSize: 16, color: '#000', fontWeight: '700', marginBottom: 20 },
-
-  // Detail content (fades in after expand)
-  heroArtworkArea: {
-    alignItems: 'center',
+  listTextContainer: {
     flex: 1,
+    marginRight: 10,
   },
-  heroArtworkShadow: {
-    width: SCREEN_WIDTH * 0.78,
-    height: SCREEN_WIDTH * 0.78,
-    borderRadius: 32,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 20 },
-    shadowOpacity: 0.35,
-    shadowRadius: 30,
-    elevation: 20,
-    overflow: Platform.OS === 'android' ? 'hidden' : 'visible',
-  },
-  heroArtwork: {
-    width: '100%',
-    height: '100%',
-    borderRadius: 32,
-  },
-
-  heroInfoPanel: {
-    paddingHorizontal: 28,
-    paddingBottom: 50,
-  },
-  heroInfoLabel: {
-    fontSize: 12,
-    color: 'rgba(0,0,0,0.45)',
-    fontWeight: '800',
-    letterSpacing: 1.5,
-    marginBottom: 6,
-  },
-  heroInfoTitle: {
-    fontSize: 30,
-    fontWeight: '800',
-    color: '#000',
-    lineHeight: 36,
+  listTitle: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '600',
     marginBottom: 4,
   },
-  heroInfoDuration: {
-    fontSize: 16,
-    color: 'rgba(0,0,0,0.55)',
-    fontWeight: '600',
-    marginBottom: 24,
+  listArtist: {
+    color: 'rgba(255,255,255,0.5)',
+    fontSize: 13,
+  },
+  bottomNav: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    height: 80,
+    backgroundColor: '#121212',
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255,255,255,0.1)',
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    alignItems: 'center',
+    paddingBottom: 20,
   },
 
-  heroProgressBg: {
-    height: 5,
-    backgroundColor: 'rgba(0,0,0,0.12)',
-    borderRadius: 3,
-    marginBottom: 8,
+  searchBarContainer: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    borderRadius: 20,
+    paddingHorizontal: 12,
+    height: 40,
   },
-  heroProgressFill: {
-    height: '100%',
-    backgroundColor: 'rgba(0,0,0,0.45)',
-    borderRadius: 3,
+  searchIcon: { marginRight: 8 },
+  searchInput: { flex: 1, color: '#fff', fontSize: 16 },
+
+  // Hero Styles
+  heroOverlay: {
+    ...(StyleSheet.absoluteFill as object),
+    backgroundColor: '#121212',
+    zIndex: 9999,
   },
-  heroTimeRow: {
+  heroHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    marginBottom: 28,
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    marginBottom: 30,
   },
-  heroTimeText: {
-    fontSize: 12,
-    color: 'rgba(0,0,0,0.45)',
+  heroHeaderText: {
+    color: '#fff',
+    fontSize: 14,
     fontWeight: '600',
   },
-
+  heroArtworkArea: {
+    alignItems: 'center',
+    marginBottom: 40,
+  },
+  heroArtwork: {
+    width: SCREEN_WIDTH * 0.85,
+    height: SCREEN_WIDTH * 0.85,
+    borderRadius: 20,
+  },
+  heroInfoPanel: {
+    paddingHorizontal: 30,
+    flex: 1,
+  },
+  heroInfoRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 30,
+  },
+  heroInfoTitle: {
+    color: '#fff',
+    fontSize: 22,
+    fontWeight: '700',
+    marginBottom: 6,
+  },
+  heroInfoArtist: {
+    color: 'rgba(255,255,255,0.5)',
+    fontSize: 14,
+    textTransform: 'uppercase',
+  },
+  waveformRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 30,
+  },
+  waveformTime: {
+    color: 'rgba(255,255,255,0.6)',
+    fontSize: 12,
+    width: 30,
+  },
+  waveformContainer: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginHorizontal: 10,
+    height: 30,
+  },
+  waveformBar: {
+    width: 3,
+    borderRadius: 2,
+  },
   heroControls: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    gap: 36,
-  },
-  heroSecBtn: {
-    width: 52,
-    height: 52,
-    justifyContent: 'center',
-    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 40,
   },
   heroPlayBtn: {
-    width: 76,
-    height: 76,
-    borderRadius: 38,
-    backgroundColor: 'rgba(0,0,0,0.12)',
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: '#fff',
     justifyContent: 'center',
     alignItems: 'center',
   },
-
-  closeButton: {
-    position: 'absolute',
-    right: 16,
-    zIndex: 10,
-  },
-  closeButtonInner: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    backgroundColor: 'rgba(255,255,255,0.55)',
-    justifyContent: 'center',
+  lyricsContainer: {
     alignItems: 'center',
   },
+  lyricsBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 20,
+  },
+  lyricsBtnText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '600',
+  }
 });

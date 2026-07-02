@@ -1,8 +1,10 @@
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
+import React, { useState } from "react";
 import {
   Dimensions,
   Image,
+  Pressable,
   StyleSheet,
   Text,
   TouchableOpacity,
@@ -14,6 +16,7 @@ import { theme } from "../../constants/theme";
 import {
   playSound,
   togglePlayPause,
+  seekSound,
 } from "../../services/audioService";
 import { usePlayerStore } from "../../store/usePlayerStore";
 
@@ -22,7 +25,8 @@ const CARD_COLORS = ["#FA8094", "#E6E2D0", "#9FF843", "#39E1EA", "#A855F7"];
 
 export default function PlayerScreen() {
   const router = useRouter();
-  const { tracks, currentTrackIndex, isPlaying } = usePlayerStore();
+  const { tracks, currentTrackIndex, isPlaying, position, duration } = usePlayerStore();
+  const [progressBarWidth, setProgressBarWidth] = useState(0);
 
   if (tracks.length === 0 || currentTrackIndex === null) {
     return (
@@ -39,6 +43,7 @@ export default function PlayerScreen() {
 
   const currentTrack = tracks[currentTrackIndex];
   const cardColor = CARD_COLORS[currentTrackIndex % CARD_COLORS.length];
+  const artworkUri = currentTrack?.artwork || "https://i.pinimg.com/736x/87/b9/69/87b969ed69c7cc9c3fdebd4da442d6c1.jpg";
 
   const handlePlayPause = () => {
     togglePlayPause();
@@ -47,13 +52,13 @@ export default function PlayerScreen() {
   const handleNext = () => {
     const nextIndex = (currentTrackIndex + 1) % tracks.length;
     usePlayerStore.getState().setCurrentTrackIndex(nextIndex);
-    playSound(tracks[nextIndex].uri);
+    playSound(tracks[nextIndex].uri, true);
   };
 
   const handlePrev = () => {
     const prevIndex = (currentTrackIndex - 1 + tracks.length) % tracks.length;
     usePlayerStore.getState().setCurrentTrackIndex(prevIndex);
-    playSound(tracks[prevIndex].uri);
+    playSound(tracks[prevIndex].uri, true);
   };
 
   return (
@@ -76,7 +81,7 @@ export default function PlayerScreen() {
           <View style={styles.artworkWrapper}>
             <Image
               source={{
-                uri: "https://i.pinimg.com/736x/87/b9/69/87b969ed69c7cc9c3fdebd4da442d6c1.jpg",
+                uri: artworkUri,
               }}
               style={styles.artwork}
               resizeMode="cover"
@@ -91,14 +96,42 @@ export default function PlayerScreen() {
           <Text style={styles.artist}>Local Device Track</Text>
         </View>
 
-        {/* Progress Bar (Mock) */}
+        {/* Progress Bar */}
         <View style={styles.progressContainer}>
-          <View style={styles.progressBarBg}>
-            <View style={[styles.progressBarFill, { width: "30%" }]} />
-          </View>
+          <Pressable 
+            onLayout={(e) => setProgressBarWidth(e.nativeEvent.layout.width)}
+            onPress={(e) => {
+              if (progressBarWidth > 0 && duration > 0) {
+                const touchX = e.nativeEvent.locationX;
+                const progress = touchX / progressBarWidth;
+                seekSound(progress * duration);
+              }
+            }}
+            style={styles.progressBarBg}
+          >
+            <View 
+              style={[
+                styles.progressBarFill, 
+                { width: `${duration > 0 ? (position / duration) * 100 : 0}%` }
+              ]} 
+            />
+          </Pressable>
           <View style={styles.timeRow}>
-            <Text style={styles.timeText}>1:20</Text>
-            <Text style={styles.timeText}>-2:15</Text>
+            <Text style={styles.timeText}>
+              {(() => {
+                const mins = Math.floor(position / 60);
+                const secs = Math.floor(position % 60);
+                return `${mins}:${String(secs).padStart(2, "0")}`;
+              })()}
+            </Text>
+            <Text style={styles.timeText}>
+              {(() => {
+                const remaining = Math.max(duration - position, 0);
+                const mins = Math.floor(remaining / 60);
+                const secs = Math.floor(remaining % 60);
+                return `-${mins}:${String(secs).padStart(2, "0")}`;
+              })()}
+            </Text>
           </View>
         </View>
 

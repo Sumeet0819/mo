@@ -1,46 +1,110 @@
+import { createAudioPlayer } from 'expo-audio';
 import { usePlayerStore } from '../store/usePlayerStore';
 
-// Mocking expo-av since the native module is missing in the current Expo Go client.
-let mockTimer: any = null;
+let playerInstance: any = null;
+let statusSubscription: any = null;
+let currentUri: string | null = null; // track which URI is loaded
 
-export const playSound = async (uri: string) => {
-  const { setSound, setIsPlaying, updateProgress } = usePlayerStore.getState();
+/**
+ * Load and optionally play a URI.
+ * If the same URI is already loaded, only the play/pause state is changed
+ * — the player is NOT torn down and re-created.
+ */
+export const playSound = async (uri: string, shouldPlay = true) => {
+  const { setSound, setIsPlaying, updateProgress, nextTrack } = usePlayerStore.getState();
 
-  // Clear any existing mock timer
-  if (mockTimer) clearInterval(mockTimer);
-
-  console.log(`[Mock Audio] Playing URI: ${uri}`);
-  setIsPlaying(true);
-  
-  // Set a fake sound object
-  setSound({} as any);
-
-  // Mock progress updates
-  let currentPosition = 0;
-  const mockDuration = 180000; // 3 minutes mock duration
-  
-  updateProgress(currentPosition, mockDuration);
-
-  mockTimer = setInterval(() => {
-    const state = usePlayerStore.getState();
-    if (state.isPlaying) {
-      currentPosition += 1000;
-      updateProgress(currentPosition, mockDuration);
-      
-      if (currentPosition >= mockDuration) {
-        clearInterval(mockTimer);
-        usePlayerStore.getState().nextTrack();
+  try {
+    // ── Deduplication & Reuse ───────────────────────────────────────────────────
+    if (playerInstance) {
+      if (currentUri !== uri) {
+        console.log(`[AudioService] Replacing URI: ${uri}`);
+        playerInstance.replace(uri);
+        currentUri = uri;
       }
+      
+      setIsPlaying(shouldPlay);
+      if (shouldPlay) {
+        playerInstance.play();
+      } else {
+        playerInstance.pause();
+      }
+      return;
     }
-  }, 1000);
+
+    console.log(`[AudioService] Initializing URI: ${uri}, shouldPlay: ${shouldPlay}`);
+
+    // ── Create new AudioPlayer ────────────────────────────────────────────────
+    playerInstance = createAudioPlayer(uri);
+    currentUri = uri;
+    setSound(playerInstance);
+    setIsPlaying(shouldPlay);
+
+    if (shouldPlay) {
+      playerInstance.play();
+    }
+
+    // ── Status listener ───────────────────────────────────────────────────────
+    statusSubscription = playerInstance.addListener('playbackStatusUpdate', (status: any) => {
+      updateProgress(status.currentTime || 0, status.duration || 0);
+
+      if (usePlayerStore.getState().isPlaying !== status.playing) {
+        setIsPlaying(status.playing);
+      }
+
+      if (status.didJustFinish) {
+        nextTrack();
+
+        const state = usePlayerStore.getState();
+        if (state.tracks.length > 0) {
+          const nextTrackItem = state.tracks[state.currentTrackIndex];
+          if (nextTrackItem) {
+            playSound(nextTrackItem.uri, true);
+          }
+        }
+      }
+    });
+
+  } catch (error) {
+    console.error('[AudioService] Error playing sound:', error);
+  }
 };
 
 export const togglePlayPause = async () => {
-  const { isPlaying, setIsPlaying } = usePlayerStore.getState();
-  console.log(`[Mock Audio] Toggling Play/Pause. Currently playing: ${isPlaying}`);
-  setIsPlaying(!isPlaying);
+  const { isPlaying, setIsPlaying, tracks, currentTrackIndex } = usePlayerStore.getState();
+
+  if (!playerInstance) {
+    if (tracks.length > 0 && currentTrackIndex !== null) {
+      const track = tracks[currentTrackIndex];
+      if (track) {
+        await playSound(track.uri, true);
+      }
+    }
+    return;
+  }
+
+  // Check if track index changed (e.g. from swiping) without playing
+  if (tracks.length > 0 && currentTrackIndex !== null) {
+    const expectedTrack = tracks[currentTrackIndex];
+    if (expectedTrack && currentUri !== expectedTrack.uri) {
+      console.log(`[AudioService] Track changed via swipe, loading new URI: ${expectedTrack.uri}`);
+      await playSound(expectedTrack.uri, true);
+      return;
+    }
+  }
+
+  console.log(`[AudioService] Toggling Play/Pause. Currently playing: ${isPlaying}`);
+
+  if (isPlaying) {
+    playerInstance.pause();
+    setIsPlaying(false);
+  } else {
+    playerInstance.play();
+    setIsPlaying(true);
+  }
 };
 
-export const seekSound = async (positionMillis: number) => {
-  console.log(`[Mock Audio] Seeking to: ${positionMillis}`);
+export const seekSound = async (positionSeconds: number) => {
+  if (!playerInstance) return;
+  console.log(`[AudioService] Seeking to: ${positionSeconds}s`);
+  playerInstance.seekTo(positionSeconds * 1000);
 };
