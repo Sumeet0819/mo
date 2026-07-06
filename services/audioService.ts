@@ -64,6 +64,8 @@ const updateLockScreen = (metadata: TrackMetadata) => {
   }
 };
 
+let latestRequestedUri: string | null = null;
+
 /**
  * Load and optionally play a URI.
  * If the same URI is already loaded, only the play/pause state is changed.
@@ -73,6 +75,7 @@ export const playSound = async (
   shouldPlay = true,
   metadata?: TrackMetadata
 ) => {
+  latestRequestedUri = uri; // Track the most recent playback request
   const { setSound, setIsPlaying, updateProgress, nextTrack } = usePlayerStore.getState();
 
   try {
@@ -85,13 +88,22 @@ export const playSound = async (
         console.log(`[AudioService] Fetching direct stream URL from API: ${uri}`);
         const response = await fetch(uri);
         const data = await response.json();
+        
+        // Concurrency check: If user clicked another song while fetching, abort this one!
+        if (latestRequestedUri !== uri) {
+          console.log(`[AudioService] Aborting play for ${uri} (a newer track was requested)`);
+          return;
+        }
+
         if (data && data.url) {
           resolvedUri = data.url;
         } else {
           console.error('[AudioService] API did not return a URL:', data);
+          return; // Abort so we don't try to play an error JSON response
         }
       } catch (e) {
         console.error('[AudioService] Failed to fetch stream URL from API:', e);
+        return; // Abort so we don't try to play an error HTML/JSON response
       }
     }
 
