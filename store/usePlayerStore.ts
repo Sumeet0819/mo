@@ -14,12 +14,14 @@ export interface PlayerState {
   tracks: AudioTrack[];
   currentTrackIndex: number;
   isPlaying: boolean;
+  isLoading: boolean;
   sound: any | null;
   position: number;
   duration: number;
   setTracks: (tracks: AudioTrack[]) => void;
   setCurrentTrackIndex: (index: number) => void;
   setIsPlaying: (isPlaying: boolean) => void;
+  setIsLoading: (isLoading: boolean) => void;
   setSound: (sound: any | null) => void;
   updateProgress: (position: number, duration: number) => void;
   updateTrackArtwork: (trackId: string, artwork: string | null) => void;
@@ -36,6 +38,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
   tracks: [],
   currentTrackIndex: 0,
   isPlaying: false,
+  isLoading: false,
   sound: null,
   position: 0,
   duration: 0,
@@ -45,6 +48,10 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
   setIsHeroOpen: (isOpen) => {
     console.debug('[PlayerStore] setIsHeroOpen:', isOpen);
     set({ isHeroOpen: isOpen });
+  },
+
+  setIsLoading: (isLoading) => {
+    set({ isLoading });
   },
 
   setFavorites: (favorites) => set({ favorites }),

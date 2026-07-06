@@ -11,6 +11,7 @@ import {
   View,
   PanResponder,
   GestureResponderEvent,
+  ActivityIndicator,
 } from "react-native";
 import Animated from "react-native-reanimated";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -27,7 +28,7 @@ const CARD_COLORS = ["#FA8094", "#E6E2D0", "#9FF843", "#39E1EA", "#A855F7"];
 
 export default function PlayerScreen() {
   const router = useRouter();
-  const { tracks, currentTrackIndex, isPlaying, position, duration } = usePlayerStore();
+  const { tracks, currentTrackIndex, isPlaying, isLoading, position, duration } = usePlayerStore();
   const [progressBarWidth, setProgressBarWidth] = useState(0);
 
   if (tracks.length === 0 || currentTrackIndex === null) {
@@ -152,27 +153,33 @@ export default function PlayerScreen() {
         </View>
 
         <View style={styles.controlsContainer}>
-          <TouchableOpacity onPress={handlePrev} style={styles.secondaryButton}>
+          <TouchableOpacity onPress={handlePrev} style={styles.secondaryButton} disabled={isLoading}>
             <Ionicons
               name="play-skip-back"
               size={32}
               color={theme.textPrimary}
+              style={{ opacity: isLoading ? 0.5 : 1 }}
             />
           </TouchableOpacity>
 
-          <TouchableOpacity onPress={handlePlayPause} style={styles.playButton}>
-            <Ionicons
-              name={isPlaying ? "pause" : "play"}
-              size={40}
-              color="#000"
-            />
+          <TouchableOpacity onPress={handlePlayPause} style={styles.playButton} disabled={isLoading}>
+            {isLoading ? (
+              <ActivityIndicator size="large" color="#000" />
+            ) : (
+              <Ionicons
+                name={isPlaying ? "pause" : "play"}
+                size={40}
+                color="#000"
+              />
+            )}
           </TouchableOpacity>
 
-          <TouchableOpacity onPress={handleNext} style={styles.secondaryButton}>
+          <TouchableOpacity onPress={handleNext} style={styles.secondaryButton} disabled={isLoading}>
             <Ionicons
               name="play-skip-forward"
               size={32}
               color={theme.textPrimary}
+              style={{ opacity: isLoading ? 0.5 : 1 }}
             />
           </TouchableOpacity>
         </View>

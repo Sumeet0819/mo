@@ -76,7 +76,7 @@ export const playSound = async (
   metadata?: TrackMetadata
 ) => {
   latestRequestedUri = uri; // Track the most recent playback request
-  const { setSound, setIsPlaying, updateProgress, nextTrack } = usePlayerStore.getState();
+  const { setSound, setIsPlaying, setIsLoading, updateProgress, nextTrack } = usePlayerStore.getState();
 
   try {
     await ensureAudioMode();
@@ -85,6 +85,7 @@ export const playSound = async (
     let resolvedUri = uri;
     if (uri.includes('/stream/')) {
       try {
+        setIsLoading(true);
         console.log(`[AudioService] Fetching direct stream URL from API: ${uri}`);
         const response = await fetch(uri);
         const data = await response.json();
@@ -92,6 +93,7 @@ export const playSound = async (
         // Concurrency check: If user clicked another song while fetching, abort this one!
         if (latestRequestedUri !== uri) {
           console.log(`[AudioService] Aborting play for ${uri} (a newer track was requested)`);
+          setIsLoading(false);
           return;
         }
 
@@ -99,11 +101,17 @@ export const playSound = async (
           resolvedUri = data.url;
         } else {
           console.error('[AudioService] API did not return a URL:', data);
+          setIsLoading(false);
           return; // Abort so we don't try to play an error JSON response
         }
       } catch (e) {
         console.error('[AudioService] Failed to fetch stream URL from API:', e);
+        setIsLoading(false);
         return; // Abort so we don't try to play an error HTML/JSON response
+      } finally {
+        if (latestRequestedUri === uri) {
+           setIsLoading(false);
+        }
       }
     }
 
@@ -145,16 +153,23 @@ export const playSound = async (
     statusSubscription = playerInstance.addListener('playbackStatusUpdate', (status: any) => {
       updateProgress(status.currentTime || 0, status.duration || 0);
 
-      if (usePlayerStore.getState().isPlaying !== status.playing) {
+      const state = usePlayerStore.getState();
+      
+      if (state.isPlaying !== status.playing) {
         setIsPlaying(status.playing);
+      }
+      
+      // Update loading state if the native player is buffering
+      if (status.isBuffering !== undefined && state.isLoading !== status.isBuffering) {
+        setIsLoading(status.isBuffering);
       }
 
       if (status.didJustFinish) {
         nextTrack();
 
-        const state = usePlayerStore.getState();
-        if (state.tracks.length > 0) {
-          const nextTrackItem = state.tracks[state.currentTrackIndex];
+        const newState = usePlayerStore.getState();
+        if (newState.tracks.length > 0) {
+          const nextTrackItem = newState.tracks[newState.currentTrackIndex];
           if (nextTrackItem) {
             playSound(nextTrackItem.uri, true, {
               title: nextTrackItem.filename?.replace(/\.[^/.]+$/, '') || 'Unknown',
