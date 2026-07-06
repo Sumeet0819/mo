@@ -28,6 +28,7 @@ import Animated, {
 import { MiniAudioPlayer } from '../components/MiniAudioPlayer';
 import { playSound, seekSound, togglePlayPause } from '../services/audioService';
 import { addRecentlyPlayed, addRecentSearch, getRecentlyPlayed, getRecentSearches } from '../services/db';
+import { downloadSong, getLocalSongUri, isSongDownloaded } from '../services/downloadService';
 import {
   BASE_URL,
   useGetLibrarySongsQuery,
@@ -365,6 +366,8 @@ export const LibraryScreen: React.FC = () => {
   const setTracks = usePlayerStore((s) => s.setTracks);
   const setCurrentTrackIndex = usePlayerStore((s) => s.setCurrentTrackIndex);
   const setIsHeroOpen = usePlayerStore((s) => s.setIsHeroOpen);
+  const downloadingQueue = usePlayerStore((s) => s.downloadingQueue);
+  const downloadingCount = Object.keys(downloadingQueue).length;
   
   const [activeTab, setActiveTab] = useState('Popular');
   const [isSearchActive, setIsSearchActive] = useState(false);
@@ -422,11 +425,28 @@ export const LibraryScreen: React.FC = () => {
     setIsHeroOpen(true);
   };
 
-  const handleStreamSong = (song: any) => {
+  const handleDownload = async (song: any) => {
+    const songId = song.videoId || song.id;
+    if (downloadingQueue[songId] !== undefined) {
+      return;
+    }
+    const isDownloaded = isSongDownloaded(songId);
+    if (!isDownloaded) {
+      await downloadSong(songId);
+    } else {
+      console.log(`[LibraryScreen] Song ${songId} is already downloaded.`);
+    }
+  };
+
+  const handleStreamSong = async (song: any) => {
+    const songId = song.videoId || song.id;
+    const localUri = getLocalSongUri(songId);
+    const finalUri = localUri || `${BASE_URL}/stream/${songId}`;
+
     const newTrack: AudioTrack = {
-      id: song.videoId || song.id,
+      id: songId,
       filename: song.title,
-      uri: `${BASE_URL}/stream/${song.videoId || song.id}`,
+      uri: finalUri,
       duration: song.duration || 0,
       artwork: song.thumbnail || song.artwork,
       artist: song.artist || 'YouTube Music',
@@ -512,6 +532,16 @@ export const LibraryScreen: React.FC = () => {
                 <Ionicons name="search" size={24} color="#fff" />
               </TouchableOpacity>
               <View style={styles.headerRight}>
+                <TouchableOpacity style={[styles.iconBtn, { flexDirection: 'row', alignItems: 'center' }]}>
+                  {downloadingCount > 0 ? (
+                    <>
+                      <ActivityIndicator size="small" color="#fff" />
+                      <Text style={{ color: '#fff', fontSize: 12, marginLeft: 6, fontWeight: 'bold' }}>{downloadingCount}</Text>
+                    </>
+                  ) : (
+                    <Ionicons name="cloud-download-outline" size={24} color="#fff" />
+                  )}
+                </TouchableOpacity>
                 <TouchableOpacity style={styles.iconBtn}>
                   <Ionicons name="notifications-outline" size={24} color="#fff" />
                 </TouchableOpacity>
@@ -540,7 +570,18 @@ export const LibraryScreen: React.FC = () => {
                        <Text style={styles.listTitle} numberOfLines={1}>{song.title}</Text>
                        <Text style={styles.listArtist} numberOfLines={1}>{song.artist}</Text>
                      </View>
-                     <Ionicons name="ellipsis-vertical" size={20} color="rgba(255,255,255,0.6)" />
+                     <TouchableOpacity style={{ padding: 8 }} onPress={() => handleDownload(song)}>
+                       {downloadingQueue[song.videoId || song.id] !== undefined ? (
+                         <ActivityIndicator size="small" color="#fff" />
+                       ) : isSongDownloaded(song.videoId || song.id) ? (
+                         <Ionicons name="checkmark-circle" size={20} color="#4CAF50" />
+                       ) : (
+                         <Ionicons name="cloud-download-outline" size={20} color="rgba(255,255,255,0.6)" />
+                       )}
+                     </TouchableOpacity>
+                     <TouchableOpacity style={{ padding: 8 }}>
+                       <Ionicons name="ellipsis-vertical" size={20} color="rgba(255,255,255,0.6)" />
+                     </TouchableOpacity>
                    </TouchableOpacity>
                  ))}
                </View>
@@ -586,6 +627,15 @@ export const LibraryScreen: React.FC = () => {
                           <Text style={styles.quickPickTitle} numberOfLines={1}>{song.title || song.filename}</Text>
                           <Text style={styles.quickPickArtist} numberOfLines={1}>{song.artist}</Text>
                         </View>
+                        <TouchableOpacity style={{ padding: 8 }} onPress={() => handleDownload(song)}>
+                          {downloadingQueue[song.videoId || song.id] !== undefined ? (
+                            <ActivityIndicator size="small" color="#fff" />
+                          ) : isSongDownloaded(song.videoId || song.id) ? (
+                            <Ionicons name="checkmark-circle" size={20} color="#4CAF50" />
+                          ) : (
+                            <Ionicons name="cloud-download-outline" size={20} color="#fff" />
+                          )}
+                        </TouchableOpacity>
                         <TouchableOpacity style={{ padding: 8 }}>
                           <Ionicons name="ellipsis-vertical" size={20} color="#fff" />
                         </TouchableOpacity>

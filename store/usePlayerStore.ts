@@ -32,6 +32,9 @@ export interface PlayerState {
   toggleFavorite: (id: string) => void;
   isHeroOpen: boolean;
   setIsHeroOpen: (isOpen: boolean) => void;
+  downloadingQueue: Record<string, number>;
+  setDownloadProgress: (songId: string, progress: number) => void;
+  removeDownload: (songId: string) => void;
 }
 
 export const usePlayerStore = create<PlayerState>((set, get) => ({
@@ -44,6 +47,16 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
   duration: 0,
   favorites: [],
   isHeroOpen: false,
+  downloadingQueue: {},
+
+  setDownloadProgress: (songId, progress) => set((state) => ({
+    downloadingQueue: { ...state.downloadingQueue, [songId]: progress }
+  })),
+
+  removeDownload: (songId) => set((state) => {
+    const { [songId]: _, ...rest } = state.downloadingQueue;
+    return { downloadingQueue: rest };
+  }),
 
   setIsHeroOpen: (isOpen) => {
     console.debug('[PlayerStore] setIsHeroOpen:', isOpen);
