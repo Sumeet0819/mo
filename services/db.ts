@@ -1,54 +1,64 @@
 import * as SQLite from 'expo-sqlite';
 
 let db: SQLite.SQLiteDatabase | null = null;
+let initPromise: Promise<void> | null = null;
 
 export const initDB = async () => {
-  try {
-    db = await SQLite.openDatabaseAsync('mo_app.db');
+  if (initPromise) return initPromise;
+  
+  initPromise = (async () => {
+    try {
+      db = await SQLite.openDatabaseAsync('mo_app.db', { useNewConnection: true });
 
-    // Create recent_searches table
-    await db.execAsync(`
-      CREATE TABLE IF NOT EXISTS recent_searches (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        query TEXT UNIQUE,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
+      // Create recent_searches table
+      await db.execAsync(`
+        CREATE TABLE IF NOT EXISTS recent_searches (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          query TEXT UNIQUE,
+          timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+      `);
 
-    // Create recently_played table
-    await db.execAsync(`
-      CREATE TABLE IF NOT EXISTS recently_played (
-        id TEXT PRIMARY KEY,
-        title TEXT,
-        artist TEXT,
-        artwork TEXT,
-        duration INTEGER,
-        uri TEXT,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
+      // Create recently_played table
+      await db.execAsync(`
+        CREATE TABLE IF NOT EXISTS recently_played (
+          id TEXT PRIMARY KEY,
+          title TEXT,
+          artist TEXT,
+          artwork TEXT,
+          duration INTEGER,
+          uri TEXT,
+          timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+      `);
 
-    // Create favorites table
-    await db.execAsync(`
-      CREATE TABLE IF NOT EXISTS favorites (
-        id TEXT PRIMARY KEY,
-        title TEXT,
-        artist TEXT,
-        artwork TEXT,
-        duration INTEGER,
-        uri TEXT,
-        addedAt DATETIME DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
-    
-    console.log('[DB] Initialized successfully');
-  } catch (error) {
-    console.error('[DB] Failed to initialize database:', error);
-  }
+      // Create favorites table
+      await db.execAsync(`
+        CREATE TABLE IF NOT EXISTS favorites (
+          id TEXT PRIMARY KEY,
+          title TEXT,
+          artist TEXT,
+          artwork TEXT,
+          duration INTEGER,
+          uri TEXT,
+          addedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+      `);
+      
+      console.log('[DB] Initialized successfully');
+    } catch (error) {
+      console.error('[DB] Failed to initialize database:', error);
+      initPromise = null;
+      throw error;
+    }
+  })();
+  
+  return initPromise;
 };
 
 // -- Recent Searches --
 export const addRecentSearch = async (query: string) => {
+  await initDB();
   if (!db) return;
   try {
     // Insert or replace to update the timestamp if it already exists
@@ -67,6 +77,7 @@ export const addRecentSearch = async (query: string) => {
 };
 
 export const getRecentSearches = async () => {
+  await initDB();
   if (!db) return [];
   try {
     const result = await db.getAllAsync('SELECT query FROM recent_searches ORDER BY timestamp DESC');
@@ -78,6 +89,7 @@ export const getRecentSearches = async () => {
 };
 
 export const clearRecentSearches = async () => {
+  await initDB();
   if (!db) return;
   try {
     await db.runAsync('DELETE FROM recent_searches');
@@ -88,6 +100,7 @@ export const clearRecentSearches = async () => {
 
 // -- Recently Played --
 export const addRecentlyPlayed = async (song: any) => {
+  await initDB();
   if (!db) return;
   try {
     const { id, title, artist, artwork, duration, uri } = song;
@@ -109,6 +122,7 @@ export const addRecentlyPlayed = async (song: any) => {
 };
 
 export const getRecentlyPlayed = async () => {
+  await initDB();
   if (!db) return [];
   try {
     return await db.getAllAsync('SELECT * FROM recently_played ORDER BY timestamp DESC');
@@ -120,6 +134,7 @@ export const getRecentlyPlayed = async () => {
 
 // -- Favorites --
 export const toggleFavoriteDB = async (song: any, isFavorite: boolean) => {
+  await initDB();
   if (!db) return;
   try {
     if (isFavorite) {
@@ -137,6 +152,7 @@ export const toggleFavoriteDB = async (song: any, isFavorite: boolean) => {
 };
 
 export const getFavorites = async () => {
+  await initDB();
   if (!db) return [];
   try {
     return await db.getAllAsync('SELECT * FROM favorites ORDER BY addedAt DESC');
