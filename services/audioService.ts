@@ -78,11 +78,28 @@ export const playSound = async (
   try {
     await ensureAudioMode();
 
+    // Resolve the real streaming URL if it's our backend API endpoint
+    let resolvedUri = uri;
+    if (uri.includes('/stream/')) {
+      try {
+        console.log(`[AudioService] Fetching direct stream URL from API: ${uri}`);
+        const response = await fetch(uri);
+        const data = await response.json();
+        if (data && data.url) {
+          resolvedUri = data.url;
+        } else {
+          console.error('[AudioService] API did not return a URL:', data);
+        }
+      } catch (e) {
+        console.error('[AudioService] Failed to fetch stream URL from API:', e);
+      }
+    }
+
     // ── Deduplication & Reuse ────────────────────────────────────────────────
     if (playerInstance) {
       if (currentUri !== uri) {
         console.log(`[AudioService] Replacing URI: ${uri}`);
-        playerInstance.replace(uri);
+        playerInstance.replace(resolvedUri);
         currentUri = uri;
         // Update lock screen metadata for the new track
         if (metadata) updateLockScreen(metadata);
@@ -100,7 +117,7 @@ export const playSound = async (
     console.log(`[AudioService] Initializing URI: ${uri}, shouldPlay: ${shouldPlay}`);
 
     // ── Create new AudioPlayer ───────────────────────────────────────────────
-    playerInstance = createAudioPlayer(uri);
+    playerInstance = createAudioPlayer(resolvedUri);
     currentUri = uri;
     setSound(playerInstance);
     setIsPlaying(shouldPlay);

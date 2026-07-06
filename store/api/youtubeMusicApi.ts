@@ -9,10 +9,12 @@ const defaultBaseUrl =
     : "http://localhost:3000/api/v1";
 export const BASE_URL = process.env.EXPO_PUBLIC_API_URL || defaultBaseUrl;
 
+console.log(`[API INIT] Connected to API endpoint: ${BASE_URL}`);
+
 const rawBaseQuery = fetchBaseQuery({ baseUrl: BASE_URL });
 
 const customBaseQuery = async (args: any, api: any, extraOptions: any) => {
-  console.log(`[API REQUEST] ${api.endpoint}:`, args);
+  console.log(`[API REQUEST] ${api.endpoint} to ${BASE_URL}:`, args);
   const result = await rawBaseQuery(args, api, extraOptions);
   if (result.error) {
     console.error(`[API ERROR] ${api.endpoint}:`, result.error);
